@@ -106,6 +106,7 @@ $appxManifestXml = @"
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
     <uap3:Capability Name="userNotificationListener" />
+    <DeviceCapability Name="radios" />
   </Capabilities>
 </Package>
 "@

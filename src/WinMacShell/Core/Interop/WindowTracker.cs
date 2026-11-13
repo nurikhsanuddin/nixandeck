@@ -14,6 +14,7 @@ public sealed class WindowTracker : IDisposable
     private bool _disposed;
     private bool _lastOverlapState;
     private bool _lastFullscreenState;
+    private IntPtr _lastForegroundHwnd;
 
     public event EventHandler<bool>? DockOverlapChanged;
     public event EventHandler<bool>? FullscreenChanged;
@@ -124,6 +125,7 @@ public sealed class WindowTracker : IDisposable
 
         if (eventType == NativeMethods.EVENT_SYSTEM_FOREGROUND)
         {
+            _lastForegroundHwnd = hwnd;
             ForegroundChanged?.Invoke(this, hwnd);
         }
 
@@ -133,6 +135,12 @@ public sealed class WindowTracker : IDisposable
     public void EvaluateForegroundState()
     {
         IntPtr fg = NativeMethods.GetForegroundWindow();
+        if (fg != IntPtr.Zero && fg != _lastForegroundHwnd && !_ignoredHandles.Contains(fg))
+        {
+            _lastForegroundHwnd = fg;
+            ForegroundChanged?.Invoke(this, fg);
+        }
+
         var (isOverlap, isFullscreen) = EvaluateWindowMetrics(fg);
 
         if (isOverlap != _lastOverlapState)
@@ -155,6 +163,32 @@ public sealed class WindowTracker : IDisposable
 
     internal static bool IsTrueBorderlessFullscreen(IntPtr hwnd, NativeMethods.RECT winRect, NativeMethods.MONITORINFO mi)
     {
+        // Maximized desktop windows (WS_MAXIMIZE / IsZoomed) are never borderless fullscreen video/games
+        if (NativeMethods.IsZoomed(hwnd))
+        {
+            return false;
+        }
+
+        int style = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_STYLE);
+        if ((style & NativeMethods.WS_CAPTION) != 0)
+        {
+            return false;
+        }
+
+        string cls = GetWindowClassName(hwnd);
+        // WPF desktop apps (e.g. Affinity Designer / Photo / Publisher) and creative suites use custom WindowStyle.None chrome
+        if (cls.StartsWith("HwndWrapper[", StringComparison.OrdinalIgnoreCase) ||
+            cls.StartsWith("Owl.Window", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string procName = GetProcessName(hwnd);
+        if (IsDesktopProductivityOrCreativeApp(procName))
+        {
+            return false;
+        }
+
         bool coversMonitor =
             winRect.Left <= mi.rcMonitor.Left &&
             winRect.Top <= mi.rcMonitor.Top &&
@@ -166,7 +200,6 @@ public sealed class WindowTracker : IDisposable
             return false;
         }
 
-        int style = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_STYLE);
         bool hasNoThickFrame = (style & NativeMethods.WS_THICKFRAME) == 0;
         bool matchesExactMonitorBounds =
             winRect.Left == mi.rcMonitor.Left &&
@@ -175,6 +208,23 @@ public sealed class WindowTracker : IDisposable
             winRect.Bottom == mi.rcMonitor.Bottom;
 
         return hasNoThickFrame || matchesExactMonitorBounds;
+    }
+
+    private static bool IsDesktopProductivityOrCreativeApp(string procName)
+    {
+        if (string.IsNullOrEmpty(procName)) return false;
+        return procName.Contains("Affinity", StringComparison.OrdinalIgnoreCase) ||
+               procName.Equals("Designer", StringComparison.OrdinalIgnoreCase) ||
+               procName.Equals("Photo", StringComparison.OrdinalIgnoreCase) ||
+               procName.Equals("Publisher", StringComparison.OrdinalIgnoreCase) ||
+               procName.Contains("Photoshop", StringComparison.OrdinalIgnoreCase) ||
+               procName.Contains("Illustrator", StringComparison.OrdinalIgnoreCase) ||
+               procName.Contains("Figma", StringComparison.OrdinalIgnoreCase) ||
+               procName.Contains("Blender", StringComparison.OrdinalIgnoreCase) ||
+               procName.Contains("CLIPStudio", StringComparison.OrdinalIgnoreCase) ||
+               procName.Equals("Taskmgr", StringComparison.OrdinalIgnoreCase) ||
+               procName.Equals("Code", StringComparison.OrdinalIgnoreCase) ||
+               procName.Equals("devenv", StringComparison.OrdinalIgnoreCase);
     }
 
     private (bool DockOverlap, bool Fullscreen) EvaluateWindowMetrics(IntPtr hwnd)

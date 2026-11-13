@@ -43,6 +43,17 @@ internal static class NativeMethods
     public const int SW_MINIMIZE = 6;
     public const int SW_RESTORE = 9;
 
+    public const uint GA_ROOT = 2;
+    public const uint GA_ROOTOWNER = 3;
+    public const uint WM_SYSCOMMAND = 0x0112;
+    public const int SC_MINIMIZE = 0xF020;
+    public const int SC_RESTORE = 0xF120;
+    public const int GCLP_HICON = -14;
+    public const int GCLP_HICONSM = -34;
+    public const uint WM_GETICON = 0x007F;
+    public const int ICON_BIG = 1;
+    public const int ICON_SMALL2 = 2;
+
     public const int DWMWA_NCRENDERING_POLICY = 2;
     public const int DWMNCRP_DISABLED = 1;
     public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
@@ -366,4 +377,205 @@ internal static class NativeMethods
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetSystemTimes(out ulong lpIdleTime, out ulong lpKernelTime, out ulong lpUserTime);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern void SwitchToThisWindow(IntPtr hWnd, [MarshalAs(UnmanagedType.Bool)] bool fAltTab);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    public static extern IntPtr SendMessageTimeout(
+        IntPtr hWnd,
+        uint Msg,
+        IntPtr wParam,
+        IntPtr lParam,
+        uint fuFlags,
+        uint uTimeout,
+        out IntPtr lpdwResult);
+
+    [DllImport("user32.dll", EntryPoint = "GetClassLongPtr")]
+    public static extern IntPtr GetClassLongPtr(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool LockWorkStation();
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct INPUT
+    {
+        public uint type;
+        public KEYBDINPUT ki;
+        private readonly ulong _padding;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KEYBDINPUT
+    {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public UIntPtr dwExtraInfo;
+    }
+
+    public const uint INPUT_KEYBOARD = 1;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint SendInput(uint nInputs, [In] INPUT[] pInputs, int cbSize);
+
+    // Native WLAN API for real-time Wi-Fi signal strength (0..100%)
+    public const int WLAN_API_VERSION_2_0 = 2;
+    public const int wlan_intf_opcode_current_connection = 7;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct WLAN_INTERFACE_INFO
+    {
+        public Guid InterfaceGuid;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+        public string strInterfaceDescription;
+        public int isState;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DOT11_SSID
+    {
+        public uint uSSIDLength;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+        public byte[] ucSSID;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct WLAN_ASSOCIATION_ATTRIBUTES
+    {
+        public DOT11_SSID dot11Ssid;
+        public int dot11BssType;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 6)]
+        public byte[] dot11Bssid;
+        public int dot11PhyType;
+        public uint uDot11PhyIndex;
+        public uint wlanSignalQuality;
+        public uint ulRxRate;
+        public uint ulTxRate;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct WLAN_SECURITY_ATTRIBUTES
+    {
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool bSecurityEnabled;
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool bOneXEnabled;
+        public int dot11AuthAlgorithm;
+        public int dot11CipherAlgorithm;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct WLAN_CONNECTION_ATTRIBUTES
+    {
+        public int isState;
+        public int wlanConnectionMode;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+        public string strProfileName;
+        public WLAN_ASSOCIATION_ATTRIBUTES wlanAssociationAttributes;
+        public WLAN_SECURITY_ATTRIBUTES wlanSecurityAttributes;
+    }
+
+    [DllImport("wlanapi.dll")]
+    public static extern uint WlanOpenHandle(
+        uint dwClientVersion,
+        IntPtr pReserved,
+        out uint pdwNegotiatedVersion,
+        out IntPtr phClientHandle);
+
+    [DllImport("wlanapi.dll")]
+    public static extern uint WlanCloseHandle(IntPtr hClientHandle, IntPtr pReserved);
+
+    [DllImport("wlanapi.dll")]
+    public static extern uint WlanEnumInterfaces(
+        IntPtr hClientHandle,
+        IntPtr pReserved,
+        out IntPtr ppInterfaceList);
+
+    [DllImport("wlanapi.dll")]
+    public static extern uint WlanQueryInterface(
+        IntPtr hClientHandle,
+        [In] ref Guid pInterfaceGuid,
+        int OpCode,
+        IntPtr pReserved,
+        out uint pdwDataSize,
+        out IntPtr ppData,
+        IntPtr pWlanOpcodeValueType);
+
+    [DllImport("wlanapi.dll")]
+    public static extern void WlanFreeMemory(IntPtr pMemory);
+
+    // Windows 11 Do Not Disturb (Quiet Hours) WNF state: WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED
+    public const ulong WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED = 0x0D83063EA3BF1C75UL;
+
+    [DllImport("ntdll.dll")]
+    public static extern int NtQueryWnfStateData(
+        ref ulong StateName,
+        IntPtr TypeId,
+        IntPtr ExplicitScope,
+        out uint ChangeStamp,
+        byte[] Buffer,
+        ref uint BufferSize);
+
+    [DllImport("ntdll.dll")]
+    public static extern int NtUpdateWnfStateData(
+        ref ulong StateName,
+        byte[] Buffer,
+        uint Length,
+        IntPtr TypeId,
+        IntPtr ExplicitScope,
+        uint MatchingChangeStamp,
+        [MarshalAs(UnmanagedType.Bool)] bool CheckStamp);
+
+    // Windows Shell high-res icon extraction (IShellItemImageFactory)
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SIZE
+    {
+        public int cx;
+        public int cy;
+    }
+
+    [Flags]
+    public enum SIIGBF
+    {
+        SIIGBF_RESIZETOFIT = 0x00,
+        SIIGBF_BIGGERSIZEOK = 0x01,
+        SIIGBF_MEMORYONLY = 0x02,
+        SIIGBF_ICONONLY = 0x04,
+        SIIGBF_THUMBNAILONLY = 0x08,
+        SIIGBF_INCACHEONLY = 0x10
+    }
+
+    [ComImport]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b")]
+    public interface IShellItemImageFactory
+    {
+        [PreserveSig]
+        int GetImage(SIZE size, SIIGBF flags, out IntPtr phbm);
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+    public static extern int SHCreateItemFromParsingName(
+        string pszPath,
+        IntPtr pbc,
+        [In] ref Guid riid,
+        [MarshalAs(UnmanagedType.Interface)] out IShellItemImageFactory ppv);
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DeleteObject(IntPtr hObject);
 }

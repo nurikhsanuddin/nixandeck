@@ -37,10 +37,15 @@ public sealed class ConfigManager
                 if (loaded != null)
                 {
                     loaded.PinnedApps ??= new List<PinnedAppItem>();
+                    int removedInvalid = loaded.PinnedApps.RemoveAll(p =>
+                        !string.IsNullOrWhiteSpace(p.AppUserModelId) &&
+                        p.AppUserModelId.Contains("__", StringComparison.Ordinal));
                     Config = loaded;
-                    if (!Config.HasImportedTaskbarPins)
+                    int countBefore = Config.PinnedApps.Count;
+                    ImportTaskbarPins();
+                    if (!Config.HasImportedTaskbarPins || Config.PinnedApps.Count != countBefore || removedInvalid > 0)
                     {
-                        ImportTaskbarPins();
+                        Config.HasImportedTaskbarPins = true;
                         Save();
                     }
                     return Config;
@@ -78,6 +83,21 @@ public sealed class ConfigManager
         Config.HasImportedTaskbarPins = true;
     }
 
+    public void SyncWithTaskbarPins(bool replaceWithTaskbar = false)
+    {
+        if (replaceWithTaskbar)
+        {
+            Config.PinnedApps.Clear();
+        }
+
+        ImportTaskbarPins();
+        if (Config.PinnedApps.Count == 0)
+        {
+            Config.PinnedApps.Add(new PinnedAppItem { Name = "File Explorer", ExecutablePath = "explorer.exe" });
+        }
+        Save();
+    }
+
     public void Save()
     {
         try
@@ -97,9 +117,7 @@ public sealed class ConfigManager
         AutoHideDock = true,
         PinnedApps = new List<PinnedAppItem>
         {
-            new() { Name = "File Explorer", ExecutablePath = "explorer.exe" },
-            new() { Name = "Windows Terminal", ExecutablePath = "wt.exe" },
-            new() { Name = "Notepad", ExecutablePath = "notepad.exe" }
+            new() { Name = "File Explorer", ExecutablePath = "explorer.exe" }
         }
     };
 }

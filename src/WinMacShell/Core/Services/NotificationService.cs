@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Media.Imaging;
 using System.Xml.Linq;
+using Microsoft.Win32;
 using Windows.Foundation;
 using Windows.Storage.Streams;
 using Windows.UI.Notifications;
@@ -36,9 +37,170 @@ public sealed class NotificationService : IDisposable
     public bool IsDoNotDisturb { get; private set; }
     public string StatusMessage { get; private set; } = "Initializing notifications...";
 
+    private const string QuietHoursCloudStoreSubKey =
+        @"Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount\$$windows.data.notifications.quiethourssettings\Current";
+    private const string ProfileUnrestricted = "Microsoft.QuietHoursProfile.Unrestricted";
+    private const string ProfilePriorityOnly = "Microsoft.QuietHoursProfile.PriorityOnly";
+    private const string ProfileAlarmsOnly = "Microsoft.QuietHoursProfile.AlarmsOnly";
+
+    private static bool? QueryCloudStoreDoNotDisturb()
+    {
+        try
+        {
+            using RegistryKey? key = Registry.CurrentUser.OpenSubKey(QuietHoursCloudStoreSubKey);
+            if (key?.GetValue("Data") is byte[] data && data.Length > 0)
+            {
+                string text = Encoding.Unicode.GetString(data);
+                if (text.Contains(ProfilePriorityOnly, StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains(ProfileAlarmsOnly, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+                if (text.Contains(ProfileUnrestricted, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+        }
+        catch { }
+
+        return null;
+    }
+
+    private static bool UpdateCloudStoreDoNotDisturb(bool enable)
+    {
+        try
+        {
+            using RegistryKey? key = Registry.CurrentUser.OpenSubKey(QuietHoursCloudStoreSubKey, writable: true);
+            if (key?.GetValue("Data") is not byte[] data || data.Length < 12)
+            {
+                return false;
+            }
+
+            string targetProfile = enable ? ProfilePriorityOnly : ProfileUnrestricted;
+            byte[] targetBytes = Encoding.Unicode.GetBytes(targetProfile);
+
+            string[] knownProfiles = { ProfileUnrestricted, ProfilePriorityOnly, ProfileAlarmsOnly };
+            foreach (string existingProfile in knownProfiles)
+            {
+                byte[] existingBytes = Encoding.Unicode.GetBytes(existingProfile);
+                int idx = data.AsSpan().IndexOf(existingBytes);
+                if (idx < 0) continue;
+
+                byte[] updated;
+                if (existingBytes.Length == targetBytes.Length)
+                {
+                    updated = (byte[])data.Clone();
+                    System.Buffer.BlockCopy(targetBytes, 0, updated, idx, targetBytes.Length);
+                }
+                else
+                {
+                    updated = new byte[data.Length - existingBytes.Length + targetBytes.Length];
+                    System.Buffer.BlockCopy(data, 0, updated, 0, idx);
+                    System.Buffer.BlockCopy(targetBytes, 0, updated, idx, targetBytes.Length);
+                    System.Buffer.BlockCopy(
+                        data,
+                        idx + existingBytes.Length,
+                        updated,
+                        idx + targetBytes.Length,
+                        data.Length - idx - existingBytes.Length);
+                    if (idx > 0)
+                    {
+                        updated[idx - 1] = (byte)targetProfile.Length;
+                    }
+                }
+
+                // Refresh 8-byte FILETIME at offset 4 so CloudStore treats this update as latest
+                byte[] nowFt = BitConverter.GetBytes(DateTime.UtcNow.ToFileTimeUtc());
+                System.Buffer.BlockCopy(nowFt, 0, updated, 4, 8);
+
+                key.SetValue("Data", updated, RegistryValueKind.Binary);
+                return true;
+            }
+        }
+        catch { }
+
+        return false;
+    }
+
+    public bool QuerySystemDoNotDisturb()
+    {
+        bool? cloudDnd = QueryCloudStoreDoNotDisturb();
+        if (cloudDnd.HasValue)
+        {
+            return cloudDnd.Value;
+        }
+
+        try
+        {
+            ulong stateName = NativeMethods.WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED;
+            byte[] buffer = new byte[16];
+            uint size = (uint)buffer.Length;
+            int hr = NativeMethods.NtQueryWnfStateData(
+                ref stateName,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                out _,
+                buffer,
+                ref size);
+
+            if (hr == 0 && size >= 4)
+            {
+                int profile = BitConverter.ToInt32(buffer, 0);
+                // Windows 11: 0 = Off, non-zero (1/2/5) = Do Not Disturb / Quiet Hours active
+                return profile != 0;
+            }
+        }
+        catch { }
+
+        return IsDoNotDisturb;
+    }
+
+    public void SyncDoNotDisturbFromSystem()
+    {
+        bool sysDnd = QuerySystemDoNotDisturb();
+        if (sysDnd != IsDoNotDisturb)
+        {
+            IsDoNotDisturb = sysDnd;
+            HistoryChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
     public void ToggleDoNotDisturb()
     {
-        IsDoNotDisturb = !IsDoNotDisturb;
+        bool current = QuerySystemDoNotDisturb();
+        bool next = !current;
+
+        bool cloudUpdated = UpdateCloudStoreDoNotDisturb(next);
+
+        try
+        {
+            ulong stateName = NativeMethods.WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED;
+            // Profile 1 = Priority Only (Windows 11 Do Not Disturb); 0 = Off
+            byte[] payload = BitConverter.GetBytes(next ? 1 : 0);
+            int hr = NativeMethods.NtUpdateWnfStateData(
+                ref stateName,
+                payload,
+                (uint)payload.Length,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                0,
+                false);
+
+            if (cloudUpdated || hr == 0)
+            {
+                IsDoNotDisturb = QuerySystemDoNotDisturb();
+            }
+            else
+            {
+                IsDoNotDisturb = next;
+            }
+        }
+        catch
+        {
+            IsDoNotDisturb = next;
+        }
+
         HistoryChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -96,6 +258,7 @@ public sealed class NotificationService : IDisposable
 
         await SyncFromWpnDatabaseAsync(initialLoad: true, populateHistory: !winrtListenerOk);
         StartNotificationFolderWatcher();
+        IsDoNotDisturb = QuerySystemDoNotDisturb();
         HistoryChanged?.Invoke(this, EventArgs.Empty);
     }
 

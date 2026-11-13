@@ -1,4 +1,5 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows.Media.Imaging;
 using Windows.Media.Control;
 using Windows.Storage.Streams;
@@ -16,7 +17,8 @@ public sealed record MediaSnapshot(
 public sealed class MediaService : IDisposable
 {
     private GlobalSystemMediaTransportControlsSessionManager? _sessionManager;
-    private GlobalSystemMediaTransportControlsSession? _currentSession;
+    private readonly List<GlobalSystemMediaTransportControlsSession> _trackedSessions = new();
+    private readonly object _sessionLock = new();
     private bool _disposed;
     private int _updateVersion;
 
@@ -32,7 +34,8 @@ public sealed class MediaService : IDisposable
             if (_disposed) return;
 
             _sessionManager.CurrentSessionChanged += OnCurrentSessionChanged;
-            AttachSession(_sessionManager.GetCurrentSession());
+            _sessionManager.SessionsChanged += OnSessionsChanged;
+            RefreshTrackedSessions();
             await RefreshMediaStateAsync();
         }
         catch
@@ -44,24 +47,49 @@ public sealed class MediaService : IDisposable
     private void OnCurrentSessionChanged(GlobalSystemMediaTransportControlsSessionManager sender, CurrentSessionChangedEventArgs args)
     {
         if (_disposed) return;
-        AttachSession(sender.GetCurrentSession());
+        RefreshTrackedSessions();
         _ = RefreshMediaStateAsync();
     }
 
-    private void AttachSession(GlobalSystemMediaTransportControlsSession? session)
+    private void OnSessionsChanged(GlobalSystemMediaTransportControlsSessionManager sender, SessionsChangedEventArgs args)
     {
-        if (_currentSession != null)
-        {
-            _currentSession.PlaybackInfoChanged -= OnPlaybackInfoChanged;
-            _currentSession.MediaPropertiesChanged -= OnMediaPropertiesChanged;
-        }
+        if (_disposed) return;
+        RefreshTrackedSessions();
+        _ = RefreshMediaStateAsync();
+    }
 
-        _currentSession = session;
-
-        if (_currentSession != null)
+    private void RefreshTrackedSessions()
+    {
+        lock (_sessionLock)
         {
-            _currentSession.PlaybackInfoChanged += OnPlaybackInfoChanged;
-            _currentSession.MediaPropertiesChanged += OnMediaPropertiesChanged;
+            foreach (var old in _trackedSessions)
+            {
+                try
+                {
+                    old.PlaybackInfoChanged -= OnPlaybackInfoChanged;
+                    old.MediaPropertiesChanged -= OnMediaPropertiesChanged;
+                }
+                catch { }
+            }
+            _trackedSessions.Clear();
+
+            if (_sessionManager == null) return;
+
+            try
+            {
+                var sessions = _sessionManager.GetSessions();
+                if (sessions != null)
+                {
+                    foreach (var s in sessions)
+                    {
+                        if (s == null) continue;
+                        _trackedSessions.Add(s);
+                        s.PlaybackInfoChanged += OnPlaybackInfoChanged;
+                        s.MediaPropertiesChanged += OnMediaPropertiesChanged;
+                    }
+                }
+            }
+            catch { }
         }
     }
 
@@ -80,7 +108,7 @@ public sealed class MediaService : IDisposable
     private async Task RefreshMediaStateAsync()
     {
         int version = Interlocked.Increment(ref _updateVersion);
-        var session = _currentSession;
+        var session = GetActiveSession();
 
         if (session == null)
         {
@@ -149,25 +177,82 @@ public sealed class MediaService : IDisposable
             if (_sessionManager != null)
             {
                 var sessions = _sessionManager.GetSessions();
-                foreach (var s in sessions)
+                if (sessions != null)
                 {
-                    if (s.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+                    foreach (var s in sessions)
                     {
-                        return s;
+                        try
+                        {
+                            if (s?.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+                            {
+                                return s;
+                            }
+                        }
+                        catch { }
                     }
+
+                    var current = _sessionManager.GetCurrentSession();
+                    if (current != null) return current;
+
+                    return sessions.FirstOrDefault();
                 }
-                return _sessionManager.GetCurrentSession() ?? _currentSession;
+
+                return _sessionManager.GetCurrentSession();
             }
         }
         catch { }
 
-        return _currentSession;
+        lock (_sessionLock)
+        {
+            return _trackedSessions.FirstOrDefault();
+        }
+    }
+
+    private static TimeSpan GetLivePosition(GlobalSystemMediaTransportControlsSession session, GlobalSystemMediaTransportControlsSessionTimelineProperties tl)
+    {
+        TimeSpan pos = tl.Position;
+        try
+        {
+            var status = session.GetPlaybackInfo()?.PlaybackStatus;
+            if (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing &&
+                tl.LastUpdatedTime != default)
+            {
+                TimeSpan elapsed = DateTimeOffset.UtcNow - tl.LastUpdatedTime;
+                if (elapsed > TimeSpan.Zero && elapsed < TimeSpan.FromHours(12))
+                {
+                    pos += elapsed;
+                }
+            }
+        }
+        catch { }
+
+        if (pos < TimeSpan.Zero) pos = TimeSpan.Zero;
+        if (tl.EndTime > TimeSpan.Zero && pos > tl.EndTime) pos = tl.EndTime;
+        return pos;
     }
 
     private static void SendMediaKey(byte vk)
     {
-        NativeMethods.keybd_event(vk, 0, 0, UIntPtr.Zero);
-        NativeMethods.keybd_event(vk, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
+        try
+        {
+            var inputs = new NativeMethods.INPUT[2];
+            inputs[0].type = NativeMethods.INPUT_KEYBOARD;
+            inputs[0].ki.wVk = vk;
+            inputs[1].type = NativeMethods.INPUT_KEYBOARD;
+            inputs[1].ki.wVk = vk;
+            inputs[1].ki.dwFlags = NativeMethods.KEYEVENTF_KEYUP;
+            uint sent = NativeMethods.SendInput(2, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
+            if (sent == 0)
+            {
+                NativeMethods.keybd_event(vk, 0, 0, UIntPtr.Zero);
+                NativeMethods.keybd_event(vk, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
+            }
+        }
+        catch
+        {
+            NativeMethods.keybd_event(vk, 0, 0, UIntPtr.Zero);
+            NativeMethods.keybd_event(vk, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
+        }
     }
 
     public async Task PlayPauseAsync()
@@ -195,33 +280,47 @@ public sealed class MediaService : IDisposable
             try
             {
                 var controls = session.GetPlaybackInfo()?.Controls;
+
+                // 1. Only trust TrySkipNextAsync first when the session explicitly enables Next Track
                 if (controls?.IsNextEnabled == true)
                 {
                     ok = await session.TrySkipNextAsync();
                 }
-                if (!ok)
+
+                // 2. For single YouTube videos / streams where IsNextEnabled is false, seek forward +15s using live interpolated timeline
+                if (!ok && controls?.IsPlaybackPositionEnabled == true)
                 {
-                    ok = await session.TrySkipNextAsync();
+                    var tl = session.GetTimelineProperties();
+                    if (tl != null && tl.EndTime > TimeSpan.Zero)
+                    {
+                        TimeSpan livePos = GetLivePosition(session, tl);
+                        TimeSpan targetPos = livePos + TimeSpan.FromSeconds(15);
+                        if (targetPos > tl.EndTime) targetPos = tl.EndTime;
+                        ok = await session.TryChangePlaybackPositionAsync(targetPos.Ticks);
+                    }
                 }
+
                 if (!ok && controls?.IsFastForwardEnabled == true)
                 {
                     ok = await session.TryFastForwardAsync();
                 }
-                if (!ok && controls?.IsPlaybackPositionEnabled == true)
+
+                if (!ok)
                 {
-                    var tl = session.GetTimelineProperties();
-                    if (tl != null)
-                    {
-                        ok = await session.TryChangePlaybackPositionAsync((tl.Position + TimeSpan.FromSeconds(10)).Ticks);
-                    }
+                    SendMediaKey(NativeMethods.VK_MEDIA_NEXT_TRACK);
+                    ok = true;
                 }
             }
-            catch { }
+            catch
+            {
+                SendMediaKey(NativeMethods.VK_MEDIA_NEXT_TRACK);
+            }
         }
-        if (!ok)
+        else
         {
             SendMediaKey(NativeMethods.VK_MEDIA_NEXT_TRACK);
         }
+
         await Task.Delay(150);
         await RefreshMediaStateAsync();
     }
@@ -235,36 +334,65 @@ public sealed class MediaService : IDisposable
             try
             {
                 var controls = session.GetPlaybackInfo()?.Controls;
+
+                // 1. Only trust TrySkipPreviousAsync first when the session explicitly enables Previous Track
                 if (controls?.IsPreviousEnabled == true)
                 {
+                    string? beforeTitle = null;
+                    try { beforeTitle = (await session.TryGetMediaPropertiesAsync())?.Title; } catch { }
+
                     ok = await session.TrySkipPreviousAsync();
+
+                    // Many players (Spotify / YouTube playlists) only rewind to 0:00 on the first Previous click if >3s into the track;
+                    // send a second Previous pulse if the track title did not change so a single click goes to the previous track.
+                    await Task.Delay(90);
+                    try
+                    {
+                        string? afterTitle = (await session.TryGetMediaPropertiesAsync())?.Title;
+                        if (!string.IsNullOrEmpty(beforeTitle) &&
+                            string.Equals(beforeTitle, afterTitle, StringComparison.Ordinal))
+                        {
+                            await session.TrySkipPreviousAsync();
+                        }
+                    }
+                    catch { }
                 }
-                if (!ok)
-                {
-                    ok = await session.TrySkipPreviousAsync();
-                }
-                if (!ok && controls?.IsRewindEnabled == true)
-                {
-                    ok = await session.TryRewindAsync();
-                }
+
+                // 2. For single YouTube videos / streams where IsPreviousEnabled is false, seek backward -15s using live interpolated timeline
                 if (!ok && controls?.IsPlaybackPositionEnabled == true)
                 {
                     var tl = session.GetTimelineProperties();
                     if (tl != null)
                     {
-                        TimeSpan targetPos = tl.Position > TimeSpan.FromSeconds(12)
-                            ? tl.Position - TimeSpan.FromSeconds(10)
+                        TimeSpan livePos = GetLivePosition(session, tl);
+                        TimeSpan targetPos = livePos > TimeSpan.FromSeconds(15)
+                            ? livePos - TimeSpan.FromSeconds(15)
                             : TimeSpan.Zero;
                         ok = await session.TryChangePlaybackPositionAsync(targetPos.Ticks);
                     }
                 }
+
+                if (!ok && controls?.IsRewindEnabled == true)
+                {
+                    ok = await session.TryRewindAsync();
+                }
+
+                if (!ok)
+                {
+                    SendMediaKey(NativeMethods.VK_MEDIA_PREV_TRACK);
+                    ok = true;
+                }
             }
-            catch { }
+            catch
+            {
+                SendMediaKey(NativeMethods.VK_MEDIA_PREV_TRACK);
+            }
         }
-        if (!ok)
+        else
         {
             SendMediaKey(NativeMethods.VK_MEDIA_PREV_TRACK);
         }
+
         await Task.Delay(150);
         await RefreshMediaStateAsync();
     }
@@ -274,10 +402,24 @@ public sealed class MediaService : IDisposable
         if (_disposed) return;
         _disposed = true;
 
-        AttachSession(null);
+        lock (_sessionLock)
+        {
+            foreach (var old in _trackedSessions)
+            {
+                try
+                {
+                    old.PlaybackInfoChanged -= OnPlaybackInfoChanged;
+                    old.MediaPropertiesChanged -= OnMediaPropertiesChanged;
+                }
+                catch { }
+            }
+            _trackedSessions.Clear();
+        }
+
         if (_sessionManager != null)
         {
             _sessionManager.CurrentSessionChanged -= OnCurrentSessionChanged;
+            _sessionManager.SessionsChanged -= OnSessionsChanged;
             _sessionManager = null;
         }
     }

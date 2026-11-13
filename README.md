@@ -23,24 +23,25 @@ Located at the center of the top bar, the **Dynamic Island** morphs smoothly usi
   - **Windows Clock Alarm Handle:** Automatically detects Windows Clock alarms, extends display time, and provides a dedicated **Stop Alarm** action button.
 - **Expanded Control Hub & Notification Tray:**
   - Opens on hover or click with two tabs: **Hub** (default) and **Tray** (automatically expanding vertically to display notification history).
-  - **Hub Tab:** Features a rich **Media Player Card** (`Prev`, `Play/Pause`, `Next` with smart fallback to `+10s`/`-10s` timeline seeking for single YouTube videos and hardware media keys) alongside **4 Uniform Rounded-Square Quick Control Tiles**:
-    - **Focus** (Do Not Disturb toggle & Focus Settings)
-    - **Mirror** (Project / Display Switcher)
-    - **Night** (Windows Night Light)
-    - **Snip** (Screen Snipping Tool `ms-screenclip:`)
+  - **Hub Tab:** Features a rich **Media Player Card** (`Prev`, `Play/Pause`, `Next` with smart live-interpolated `+15s`/`-15s` timeline seeking for single YouTube videos and hardware media keys) alongside **4 Uniform Rounded-Square Quick Control Tiles**:
+    - **DND** (Do Not Disturb toggle | Right-Click: DND / Focus Settings)
+    - **Mirror** (Project / Display Switcher | Right-Click: Display Settings)
+    - **Bluetooth** (Direct Bluetooth Radio On/Off toggle via `Windows.Devices.Radios` | Right-Click: Bluetooth Settings)
+    - **Snip** (Screen Snip `ms-screenclip:` | Right-Click: Snipping Tool)
+  - **Quick Header Shortcuts:** Night Light, Mobile Hotspot, Lock PC (`Win+L`), and Windows Settings.
   - **Tray Tab:** Clean, scrollbar-free notification drawer with a **Clear All** button and click-to-activate app switching.
 
 ### 2. 🖥️ macOS-Style Full-Width Top Menu Bar
 - **Smart Desktop Work-Area Reservation (`30px`):** Reserves `30px` at the top of your primary display via `SHAppBarMessage` & `SPI_SETWORKAREA` so normal and maximized windows sit cleanly below the top bar without overlapping window title bars.
-- **True Fullscreen Auto-Hide:** Automatically hides both the Top Bar and the Dock when you enter borderless fullscreen applications (games, YouTube fullscreen video, browser `F11`, media players).
+- **True Fullscreen Auto-Hide:** Automatically hides both the Top Bar and the Dock when you enter borderless fullscreen applications (games, YouTube fullscreen video, browser `F11`, media players) while keeping the Dock accessible in maximized creative apps (Affinity, Photoshop, etc.).
 - **Left Bar Controls:**
   - **Windows Start Button** (smart open/close toggle)
   - **`nixandock` Brand Indicator**
   - **Icon-Only Quick System Shortcuts:** File Explorer, Windows Settings, Task Manager, and Windows Terminal
   - **Live CPU & RAM Usage Telemetry:** Real-time `CPU % · RAM %` indicator (click to open Task Manager)
 - **Right Bar Controls:**
-  - **Native Full-Color System Tray:** Scrollable tray icons for background apps with full left-click and right-click context menu support.
-  - **Wi-Fi (Icon-Only):** Left-click toggles the Windows Wi-Fi flyout (`ms-availablenetworks:`); right-click opens Network & Adapter settings.
+  - **Windows-Style System Tray Dropdown:** Compact chevron button that opens a frosted-glass grid flyout of background tray icons with full left-click and right-click context menu support.
+  - **Real-Time Wi-Fi & Ethernet Status:** Automatically switches between a **3-bar Wi-Fi signal strength indicator** (powered by native `wlanapi.dll` real-time signal quality), an **Ethernet LAN icon**, or an **Offline warning icon**. Left-click toggles the Windows Network flyout (`ms-availablenetworks:`); right-click opens Network & Adapter settings.
   - **Brightness (Icon-Only):** Left-click opens a smooth hardware brightness slider (`\\.\LCD` IOCTL); scroll wheel adjusts screen brightness on the fly.
   - **Volume:** Left-click opens a modern volume slider popover; scroll wheel adjusts volume; right-click toggles mute.
   - **Dynamic Battery Indicator:** Real-time proportional fill bar that turns **green with a lightning bolt** when charging/on AC power, **red** when battery is `<= 20%`, and crisp white on normal battery discharge.

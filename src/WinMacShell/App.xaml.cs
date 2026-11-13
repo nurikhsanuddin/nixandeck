@@ -98,6 +98,29 @@ public partial class App : Application
                 return;
             }
 
+            string localAppDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "WinMacShell");
+            Directory.CreateDirectory(localAppDir);
+            File.WriteAllText(Path.Combine(localAppDir, "watchdog.pid"), Environment.ProcessId.ToString());
+
+            // Try starting the elevated Scheduled Task first (registered by Install.bat for UIPI-free Task Manager control)
+            try
+            {
+                using Process? schProc = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "schtasks.exe",
+                    Arguments = "/Run /TN \"NixanDeckWatchdogElevated\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                });
+                if (schProc != null && schProc.WaitForExit(1200) && schProc.ExitCode == 0)
+                {
+                    return;
+                }
+            }
+            catch { }
+
             using var _ = Process.Start(new ProcessStartInfo
             {
                 FileName = watchdogPath,

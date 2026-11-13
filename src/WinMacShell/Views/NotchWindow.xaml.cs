@@ -48,6 +48,7 @@ public partial class NotchWindow : Window
     private bool _isUpdatingVolumeSlider;
     private bool _isUpdatingBrightnessSlider;
     private bool _isCenterHubOpen;
+    private bool _isTrayPopupOpen;
     private bool _isVolumePopupOpen;
     private bool _isBrightnessPopupOpen;
     private bool _isClockPopupOpen;
@@ -61,6 +62,8 @@ public partial class NotchWindow : Window
     private uint _activeToastNotificationId;
     private bool _activeToastIsAlarm;
     private NotificationItem? _lastToastItem;
+    private long _lastPopupOpenedTick;
+    private long _lastTrayIconInteractTick;
     private long _startOpenedTick;
     private long _lastStartDismissByButtonTick;
     private long _wifiOpenedTick;
@@ -99,6 +102,11 @@ public partial class NotchWindow : Window
         {
             UpdateClockText();
             UpdateCpuRamMetrics();
+            _ = Task.Run(() =>
+            {
+                _systemStatusService.RefreshAndNotify();
+                _notificationService.SyncDoNotDisturbFromSystem();
+            });
         };
 
         // Allowed timer #2: Notification toast auto-collapse (4500ms)
@@ -171,16 +179,32 @@ public partial class NotchWindow : Window
                         _isWifiFlyoutOpen = false;
                     }
                 }
+
+                if (Environment.TickCount64 - _lastPopupOpenedTick > 280)
+                {
+                    bool keepTrayOpen = _isTrayPopupOpen &&
+                                        (TrayPopupShell.IsMouseOver ||
+                                         (Environment.TickCount64 - _lastTrayIconInteractTick < 1500));
+                    CloseTransientPopups(preserveTrayPopup: keepTrayOpen);
+                }
             }
 
-            CloseTransientPopups();
             if (!_isFullscreenHidden)
             {
                 DwmHelper.EnsureTopmost(this);
             }
         });
 
-        Deactivated += (_, _) => CloseTransientPopups();
+        Deactivated += (_, _) =>
+        {
+            if (Environment.TickCount64 - _lastPopupOpenedTick > 280)
+            {
+                bool keepTrayOpen = _isTrayPopupOpen &&
+                                    (TrayPopupShell.IsMouseOver ||
+                                     (Environment.TickCount64 - _lastTrayIconInteractTick < 1500));
+                CloseTransientPopups(preserveTrayPopup: keepTrayOpen);
+            }
+        };
 
         Loaded += (_, _) =>
         {
@@ -291,14 +315,14 @@ public partial class NotchWindow : Window
         double targetWidth = newState switch
         {
             DynamicIslandState.ExpandedHub => 530,
-            DynamicIslandState.NotificationToast => _activeToastIsAlarm ? 388 : 336,
+            DynamicIslandState.NotificationToast => _activeToastIsAlarm ? 464 : 424,
             DynamicIslandState.MediaPill => 292,
             _ => 140
         };
         double targetHeight = newState switch
         {
             DynamicIslandState.ExpandedHub => _showingAlertsTab ? 252 : 148,
-            DynamicIslandState.NotificationToast => 64,
+            DynamicIslandState.NotificationToast => 84,
             DynamicIslandState.MediaPill => 26,
             _ => 30
         };
@@ -359,6 +383,7 @@ public partial class NotchWindow : Window
                 SetExpandedTab(showAlerts);
                 return;
             }
+            SetTrayPopupOpen(false);
             SetVolumePopupOpen(false);
             SetBrightnessPopupOpen(false);
             SetClockPopupOpen(false);
@@ -376,16 +401,22 @@ public partial class NotchWindow : Window
         }
     }
 
-    private void SetVolumePopupOpen(bool open)
+    private void SetTrayPopupOpen(bool open)
     {
-        if (_isVolumePopupOpen == open) return;
-        _isVolumePopupOpen = open;
+        if (_isTrayPopupOpen == open && (TrayPopupShell.Visibility == Visibility.Visible) == open) return;
+        _isTrayPopupOpen = open;
+        TopTrayChevronPath.Data = (Geometry)FindResource(open ? "IconChevronUp" : "IconChevronDown");
 
         if (open)
         {
+            _lastPopupOpenedTick = Environment.TickCount64;
             SetCenterHubOpen(false);
+            SetVolumePopupOpen(false);
             SetBrightnessPopupOpen(false);
             SetClockPopupOpen(false);
+
+            AlignPopupUnderButton(TrayPopupShell, TopTrayDropdownButton, 180);
+
             IntPtr hwnd = new WindowInteropHelper(this).Handle;
             if (hwnd != IntPtr.Zero)
             {
@@ -393,6 +424,66 @@ public partial class NotchWindow : Window
             }
             Activate();
 
+            TrayPopupShell.BeginAnimation(OpacityProperty, null);
+            TrayPopupShell.Visibility = Visibility.Visible;
+            TrayPopupShell.BeginAnimation(OpacityProperty, new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(160))
+            {
+                EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
+            });
+            TrayPopupSlideTransform.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(-8.0, 0.0, TimeSpan.FromMilliseconds(200))
+            {
+                EasingFunction = new ExponentialEase { EasingMode = EasingMode.EaseOut, Exponent = 4 }
+            });
+        }
+        else
+        {
+            var fadeOut = new DoubleAnimation(0.0, TimeSpan.FromMilliseconds(140));
+            fadeOut.Completed += (_, _) =>
+            {
+                if (!_isTrayPopupOpen)
+                {
+                    TrayPopupShell.Visibility = Visibility.Collapsed;
+                }
+            };
+            TrayPopupShell.BeginAnimation(OpacityProperty, fadeOut);
+        }
+    }
+
+    private void AlignPopupUnderButton(Border popup, FrameworkElement button, double estimatedPopupWidth)
+    {
+        try
+        {
+            Point btnCenter = button.TranslatePoint(new Point(button.ActualWidth / 2.0, 0), this);
+            double rightEdgeDistance = Math.Max(10.0, ActualWidth - btnCenter.X - (estimatedPopupWidth / 2.0));
+            popup.Margin = new Thickness(0, 34, rightEdgeDistance, 0);
+        }
+        catch { }
+    }
+
+    private void SetVolumePopupOpen(bool open)
+    {
+        if (_isVolumePopupOpen == open && (VolumePopupShell.Visibility == Visibility.Visible) == open) return;
+        _isVolumePopupOpen = open;
+
+        if (open)
+        {
+            _lastPopupOpenedTick = Environment.TickCount64;
+            SetCenterHubOpen(false);
+            SetTrayPopupOpen(false);
+            SetBrightnessPopupOpen(false);
+            SetClockPopupOpen(false);
+            _ = Task.Run(_systemStatusService.RefreshAndNotify);
+
+            AlignPopupUnderButton(VolumePopupShell, TopVolumeButton, VolumePopupShell.Width);
+
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd != IntPtr.Zero)
+            {
+                NativeMethods.SetForegroundWindow(hwnd);
+            }
+            Activate();
+
+            VolumePopupShell.BeginAnimation(OpacityProperty, null);
             VolumePopupShell.Visibility = Visibility.Visible;
             VolumePopupShell.BeginAnimation(OpacityProperty, new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(160))
             {
@@ -419,14 +510,19 @@ public partial class NotchWindow : Window
 
     private void SetBrightnessPopupOpen(bool open)
     {
-        if (_isBrightnessPopupOpen == open) return;
+        if (_isBrightnessPopupOpen == open && (BrightnessPopupShell.Visibility == Visibility.Visible) == open) return;
         _isBrightnessPopupOpen = open;
 
         if (open)
         {
+            _lastPopupOpenedTick = Environment.TickCount64;
             SetCenterHubOpen(false);
+            SetTrayPopupOpen(false);
             SetVolumePopupOpen(false);
             SetClockPopupOpen(false);
+
+            AlignPopupUnderButton(BrightnessPopupShell, TopBrightnessButton, BrightnessPopupShell.Width);
+
             IntPtr hwnd = new WindowInteropHelper(this).Handle;
             if (hwnd != IntPtr.Zero)
             {
@@ -434,6 +530,7 @@ public partial class NotchWindow : Window
             }
             Activate();
 
+            BrightnessPopupShell.BeginAnimation(OpacityProperty, null);
             BrightnessPopupShell.Visibility = Visibility.Visible;
             BrightnessPopupShell.BeginAnimation(OpacityProperty, new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(160))
             {
@@ -460,12 +557,14 @@ public partial class NotchWindow : Window
 
     private void SetClockPopupOpen(bool open)
     {
-        if (_isClockPopupOpen == open) return;
+        if (_isClockPopupOpen == open && (ClockCalendarPopupShell.Visibility == Visibility.Visible) == open) return;
         _isClockPopupOpen = open;
 
         if (open)
         {
+            _lastPopupOpenedTick = Environment.TickCount64;
             SetCenterHubOpen(false);
+            SetTrayPopupOpen(false);
             SetVolumePopupOpen(false);
             SetBrightnessPopupOpen(false);
             _displayedCalendarMonth = new DateTime(DateTime.Now.Year, DateTime.Now.Month, 1);
@@ -479,6 +578,7 @@ public partial class NotchWindow : Window
             }
             Activate();
 
+            ClockCalendarPopupShell.BeginAnimation(OpacityProperty, null);
             ClockCalendarPopupShell.Visibility = Visibility.Visible;
             ClockCalendarPopupShell.BeginAnimation(OpacityProperty, new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(180))
             {
@@ -571,7 +671,7 @@ public partial class NotchWindow : Window
         RenderMonthCalendar(_displayedCalendarMonth);
     }
 
-    private void CloseTransientPopups()
+    private void CloseTransientPopups(bool preserveTrayPopup = false)
     {
         if (_activeContextMenu is { IsOpen: true } menu)
         {
@@ -582,6 +682,11 @@ public partial class NotchWindow : Window
         if (_isCenterHubOpen)
         {
             SetCenterHubOpen(false);
+        }
+
+        if (_isTrayPopupOpen && !preserveTrayPopup)
+        {
+            SetTrayPopupOpen(false);
         }
 
         if (_isVolumePopupOpen)
@@ -690,13 +795,40 @@ public partial class NotchWindow : Window
             TopBatteryButton.ToolTip = "AC Power (Click: Power Settings)";
         }
 
-        Brush wifiBrush = status.IsNetworkConnected
-            ? (Brush)FindResource("PrimaryTextBrush")
-            : (Brush)FindResource("WarningBrush");
-        TopWifiIcon.Stroke = wifiBrush;
-        TopWifiButton.ToolTip = status.IsNetworkConnected
-            ? $"Wi-Fi: {status.NetworkLabel} (Click: Flyout | Right-Click: Network Settings)"
-            : "Wi-Fi: Offline (Click: Flyout | Right-Click: Network Settings)";
+        // Real-Time Network Status (Wi-Fi Signal Strength Bars vs Ethernet vs Offline)
+        if (!status.IsNetworkConnected || status.NetworkKind == NetworkConnectionKind.Offline)
+        {
+            TopWifiBarsPanel.Visibility = Visibility.Collapsed;
+            TopEthernetIcon.Visibility = Visibility.Collapsed;
+            TopWifiOfflineIcon.Visibility = Visibility.Visible;
+            TopWifiButton.ToolTip = "Network: Offline (Click: Flyout | Right-Click: Network Settings)";
+        }
+        else if (status.NetworkKind == NetworkConnectionKind.Ethernet)
+        {
+            TopWifiBarsPanel.Visibility = Visibility.Collapsed;
+            TopWifiOfflineIcon.Visibility = Visibility.Collapsed;
+            TopEthernetIcon.Visibility = Visibility.Visible;
+            TopWifiButton.ToolTip = $"{status.NetworkLabel} (Click: Flyout | Right-Click: Network Settings)";
+        }
+        else
+        {
+            TopEthernetIcon.Visibility = Visibility.Collapsed;
+            TopWifiOfflineIcon.Visibility = Visibility.Collapsed;
+            TopWifiBarsPanel.Visibility = Visibility.Visible;
+
+            WifiInnerArc.Opacity = 1.0;
+            WifiMidArc.Opacity = status.WifiSignalBars >= 2 ? 1.0 : 0.25;
+            WifiOuterArc.Opacity = status.WifiSignalBars >= 3 ? 1.0 : 0.25;
+            TopWifiButton.ToolTip = $"{status.NetworkLabel} (Click: Flyout | Right-Click: Network Settings)";
+        }
+
+        // Real-Time Bluetooth Control Hub Tile Status
+        bool btOn = status.IsBluetoothEnabled;
+        QuickBluetoothText.Text = btOn ? "BT On" : "Bluetooth";
+        QuickBluetoothIcon.Stroke = (Brush)FindResource(btOn ? "AccentBrush" : "PrimaryTextBrush");
+        QuickBluetoothButton.Background = new SolidColorBrush(btOn
+            ? Color.FromArgb(0x36, 0x3B, 0x82, 0xF6)
+            : Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF));
     }
 
     private void OnNotificationReceived(NotificationItem item)
@@ -716,6 +848,7 @@ public partial class NotchWindow : Window
         ToastAlarmActionButton.Visibility = item.IsAlarm ? Visibility.Visible : Visibility.Collapsed;
 
         SetCenterHubOpen(false);
+        SetTrayPopupOpen(false);
         SetVolumePopupOpen(false);
         SetBrightnessPopupOpen(false);
         SetClockPopupOpen(false);
@@ -756,7 +889,7 @@ public partial class NotchWindow : Window
         ClockNotifCountBadge.Text = count.ToString(CultureInfo.InvariantCulture);
 
         bool dnd = _notificationService.IsDoNotDisturb;
-        QuickDndText.Text = dnd ? "Focus On" : "Focus";
+        QuickDndText.Text = dnd ? "DND On" : "DND";
         QuickDndIcon.Fill = (Brush)FindResource(dnd ? "AccentBrush" : "PrimaryTextBrush");
         QuickDndButton.Background = new SolidColorBrush(dnd
             ? Color.FromArgb(0x36, 0x3B, 0x82, 0xF6)
@@ -892,7 +1025,26 @@ public partial class NotchWindow : Window
         _systemStatusService.SetDisplayBrightness(e.NewValue);
     }
 
-    private void QuickBluetooth_Click(object sender, RoutedEventArgs e)
+    private async void QuickBluetooth_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        QuickBluetoothButton.IsEnabled = false;
+        try
+        {
+            bool toggled = await _systemStatusService.ToggleBluetoothAsync();
+            if (!toggled)
+            {
+                CloseTransientPopups();
+                LaunchShellUri("ms-settings:bluetooth");
+            }
+        }
+        finally
+        {
+            QuickBluetoothButton.IsEnabled = true;
+        }
+    }
+
+    private void QuickBluetooth_RightClick(object sender, MouseButtonEventArgs e)
     {
         e.Handled = true;
         CloseTransientPopups();
@@ -933,11 +1085,32 @@ public partial class NotchWindow : Window
         LaunchShellUri("ms-settings:nightlight");
     }
 
+    private void QuickHotspot_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        CloseTransientPopups();
+        LaunchShellUri("ms-settings:network-mobilehotspot");
+    }
+
+    private void QuickLockScreen_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        CloseTransientPopups();
+        NativeMethods.LockWorkStation();
+    }
+
     private void QuickSnip_Click(object sender, RoutedEventArgs e)
     {
         e.Handled = true;
         CloseTransientPopups();
         LaunchShellUri("ms-screenclip:");
+    }
+
+    private void QuickSnip_RightClick(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        CloseTransientPopups();
+        LaunchShellUri("snippingtool.exe");
     }
 
     private void QuickWinA_Click(object sender, RoutedEventArgs e)
@@ -1401,23 +1574,11 @@ public partial class NotchWindow : Window
         _notificationService.TriggerTestNotification();
     }
 
-    // --- System Tray Icons Forwarding ---
-    private void TrayScrollLeft_Click(object sender, RoutedEventArgs e)
+    // --- System Tray Dropdown & Icons Forwarding ---
+    private void TopTrayDropdown_Click(object sender, RoutedEventArgs e)
     {
         e.Handled = true;
-        TrayScrollViewer.ScrollToHorizontalOffset(Math.Max(0, TrayScrollViewer.HorizontalOffset - 80));
-    }
-
-    private void TrayScrollRight_Click(object sender, RoutedEventArgs e)
-    {
-        e.Handled = true;
-        TrayScrollViewer.ScrollToHorizontalOffset(TrayScrollViewer.HorizontalOffset + 80);
-    }
-
-    private void TrayScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
-    {
-        TrayScrollViewer.ScrollToHorizontalOffset(TrayScrollViewer.HorizontalOffset - (e.Delta / 2.0));
-        e.Handled = true;
+        SetTrayPopupOpen(!_isTrayPopupOpen);
     }
 
     private static uint GetPackedCursorPosition()
@@ -1445,6 +1606,7 @@ public partial class NotchWindow : Window
     private void TrayIcon_MouseDown(object sender, MouseButtonEventArgs e)
     {
         e.Handled = true;
+        _lastTrayIconInteractTick = Environment.TickCount64;
         if (sender is FrameworkElement { Tag: NotifyIcon icon })
         {
             icon.IconMouseDown(e.ChangedButton, GetPackedCursorPosition(), System.Windows.Forms.SystemInformation.DoubleClickTime);
@@ -1454,6 +1616,7 @@ public partial class NotchWindow : Window
     private void TrayIcon_MouseUp(object sender, MouseButtonEventArgs e)
     {
         e.Handled = true;
+        _lastTrayIconInteractTick = Environment.TickCount64;
         if (sender is FrameworkElement { Tag: NotifyIcon icon })
         {
             icon.IconMouseUp(e.ChangedButton, GetPackedCursorPosition(), System.Windows.Forms.SystemInformation.DoubleClickTime);

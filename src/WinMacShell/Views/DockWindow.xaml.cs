@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Pipes;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -18,6 +19,8 @@ namespace WinMacShell.Views;
 
 public partial class DockWindow : Window
 {
+    private const string WatchdogPipeName = "NixanDeck_WindowControlPipe";
+
     private readonly ConfigManager _configManager;
     private readonly ShellService _shellService;
     private readonly WindowTracker _windowTracker;
@@ -33,14 +36,16 @@ public partial class DockWindow : Window
         return brush;
     }
 
-    // Allowed one-shot UI interaction timers (hover reveal & smooth hide debounce)
+    // Allowed UI interaction timers (hover reveal, smooth hide debounce, & bottom-edge cursor monitor)
     private readonly DispatcherTimer _revealTimer;
     private readonly DispatcherTimer _hideDelayTimer;
+    private readonly DispatcherTimer _edgeCursorTimer;
 
     private ContextMenu? _activeContextMenu;
     private bool _shouldAutoHide;
     private bool _isHiddenByAutoHide;
     private bool _isFullscreenHidden;
+    private bool _hasAttemptedElevatedWatchdogLaunch;
     private IntPtr _lastForegroundAppHwnd;
     private IntPtr _mouseDownActiveHwnd;
     private IntPtr _lastDockActivatedHwnd;
@@ -57,13 +62,18 @@ public partial class DockWindow : Window
 
         _revealTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(60) };
         _hideDelayTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(260) };
+        _edgeCursorTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(140)
+        };
 
         _revealTimer.Tick += (_, _) =>
         {
             _revealTimer.Stop();
             _hideDelayTimer.Stop();
-            if (BottomHoverStrip.IsMouseOver || DockRoot.IsMouseOver)
+            if (BottomHoverStrip.IsMouseOver || DockRoot.IsMouseOver || IsCursorNearBottomDockEdge())
             {
+                DwmHelper.EnsureTopmost(this);
                 SetDockSlideHidden(false);
             }
         };
@@ -71,12 +81,17 @@ public partial class DockWindow : Window
         _hideDelayTimer.Tick += (_, _) =>
         {
             _hideDelayTimer.Stop();
-            if (_shouldAutoHide && !DockRoot.IsMouseOver && !BottomHoverStrip.IsMouseOver &&
+            if (_shouldAutoHide &&
+                !DockRoot.IsMouseOver &&
+                !BottomHoverStrip.IsMouseOver &&
+                !IsCursorOverVisibleDock() &&
                 (_activeContextMenu == null || !_activeContextMenu.IsOpen))
             {
                 SetDockSlideHidden(true);
             }
         };
+
+        _edgeCursorTimer.Tick += (_, _) => CheckBottomEdgeCursorHover();
 
         _shellService.TasksChanged += (_, _) => Dispatcher.BeginInvoke(RebuildDockItems);
         _windowTracker.DockOverlapChanged += (_, overlap) => Dispatcher.BeginInvoke(() => OnDockOverlapChanged(overlap));
@@ -104,6 +119,7 @@ public partial class DockWindow : Window
         {
             RebuildDockItems();
             PositionBottomCenter();
+            _edgeCursorTimer.Start();
         };
 
         SizeChanged += (_, _) => PositionBottomCenter();
@@ -112,14 +128,13 @@ public partial class DockWindow : Window
         {
             _revealTimer.Stop();
             _hideDelayTimer.Stop();
+            _edgeCursorTimer.Stop();
         };
     }
 
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
-        // Use WS_EX_NOACTIVATE so left-clicking Dock tiles does not steal focus from the foreground app before MouseLeftButtonUp fires.
-        // Right-click explicitly activates DockWindow briefly so its ContextMenu dismisses cleanly on outside click.
         DwmHelper.ConfigureShellOverlayWindow(this, enableAcrylic: false, noActivate: true);
         _windowTracker.AddIgnoredWindow(new WindowInteropHelper(this).Handle);
         PositionBottomCenter();
@@ -134,6 +149,89 @@ public partial class DockWindow : Window
 
         Left = (screenWidth - ActualWidth) / 2.0;
         Top = screenHeight - ActualHeight;
+    }
+
+    private void CheckBottomEdgeCursorHover()
+    {
+        if (_isFullscreenHidden) return;
+
+        // Also keep foreground tracking up to date for elevated windows (e.g. Task Manager) where WinEventHook is filtered by UIPI
+        IntPtr fg = NativeMethods.GetForegroundWindow();
+        IntPtr selfHwnd = new WindowInteropHelper(this).Handle;
+        if (fg != IntPtr.Zero &&
+            fg != selfHwnd &&
+            fg != _lastForegroundAppHwnd &&
+            !_windowTracker.IsIgnoredWindow(fg) &&
+            !WindowTracker.IsShellOrOverlayWindow(fg))
+        {
+            _lastForegroundAppHwnd = fg;
+            _windowTracker.EvaluateForegroundState();
+            UpdateActiveStates();
+        }
+
+        if (!_shouldAutoHide)
+        {
+            if (_isHiddenByAutoHide)
+            {
+                SetDockSlideHidden(false);
+            }
+            return;
+        }
+
+        if (_isHiddenByAutoHide)
+        {
+            if (IsCursorNearBottomDockEdge())
+            {
+                _hideDelayTimer.Stop();
+                DwmHelper.EnsureTopmost(this);
+                SetDockSlideHidden(false);
+            }
+        }
+        else if (!DockRoot.IsMouseOver &&
+                 !BottomHoverStrip.IsMouseOver &&
+                 !IsCursorOverVisibleDock() &&
+                 (_activeContextMenu == null || !_activeContextMenu.IsOpen))
+        {
+            if (!_hideDelayTimer.IsEnabled)
+            {
+                _hideDelayTimer.Start();
+            }
+        }
+    }
+
+    private bool IsCursorNearBottomDockEdge()
+    {
+        if (!NativeMethods.GetCursorPos(out NativeMethods.POINT pt)) return false;
+        DpiScale dpi = VisualTreeHelper.GetDpi(this);
+        double scaleX = dpi.DpiScaleX > 0 ? dpi.DpiScaleX : 1.0;
+        double scaleY = dpi.DpiScaleY > 0 ? dpi.DpiScaleY : 1.0;
+
+        double cursorDipX = pt.X / scaleX;
+        double cursorDipY = pt.Y / scaleY;
+        double screenHeight = SystemParameters.PrimaryScreenHeight;
+        double screenWidth = SystemParameters.PrimaryScreenWidth;
+
+        double halfDock = Math.Max(ActualWidth / 2.0 + 48.0, 220.0);
+        double centerX = screenWidth / 2.0;
+
+        return cursorDipY >= screenHeight - 6.0 &&
+               cursorDipX >= centerX - halfDock &&
+               cursorDipX <= centerX + halfDock;
+    }
+
+    private bool IsCursorOverVisibleDock()
+    {
+        if (!NativeMethods.GetCursorPos(out NativeMethods.POINT pt)) return false;
+        DpiScale dpi = VisualTreeHelper.GetDpi(this);
+        double scaleX = dpi.DpiScaleX > 0 ? dpi.DpiScaleX : 1.0;
+        double scaleY = dpi.DpiScaleY > 0 ? dpi.DpiScaleY : 1.0;
+
+        double cursorDipX = pt.X / scaleX;
+        double cursorDipY = pt.Y / scaleY;
+
+        return cursorDipX >= Left - 12.0 &&
+               cursorDipX <= Left + ActualWidth + 12.0 &&
+               cursorDipY >= Top - 8.0;
     }
 
     private void RebuildDockItems()
@@ -167,7 +265,10 @@ public partial class DockWindow : Window
                 extraRunningWindows.Add(appWindows[i]);
             }
 
-            ImageSource? icon = primaryWin?.Icon ?? GetOrLoadPinnedIcon(pinned);
+            ImageSource? icon = primaryWin?.Icon
+                ?? GetOrLoadPinnedIcon(pinned)
+                ?? (primaryWin != null ? IconHelper.ExtractIconFromWindowHandle(primaryWin.Handle) : null);
+
             string baseTitle = string.IsNullOrWhiteSpace(pinned.Name)
                 ? Path.GetFileNameWithoutExtension(pinned.ExecutablePath)
                 : pinned.Name;
@@ -186,7 +287,7 @@ public partial class DockWindow : Window
                 Icon = icon,
                 IsPinned = true,
                 IsRunning = primaryWin != null,
-                IsActive = primaryWin != null && primaryWin.Handle == fgHwnd
+                IsActive = primaryWin != null && MatchesWindowOrProcess(primaryWin, fgHwnd)
             };
             if (primaryWin != null)
             {
@@ -215,7 +316,10 @@ public partial class DockWindow : Window
                     ? win.WinFileDescription
                     : Path.GetFileNameWithoutExtension(exePath));
 
-            ImageSource? icon = win.Icon ?? GetOrLoadPathIcon(exePath);
+            ImageSource? icon = win.Icon
+                ?? (!string.IsNullOrWhiteSpace(win.AppUserModelID) ? IconHelper.ExtractIconFromAumid(win.AppUserModelID, 64) : null)
+                ?? IconHelper.ExtractIconFromWindowHandle(win.Handle)
+                ?? GetOrLoadPathIcon(exePath);
 
             var item = new DockItem
             {
@@ -226,7 +330,7 @@ public partial class DockWindow : Window
                 Icon = icon,
                 IsPinned = false,
                 IsRunning = true,
-                IsActive = win.Handle == fgHwnd
+                IsActive = MatchesWindowOrProcess(win, fgHwnd)
             };
             item.Windows.Add(win);
             newItems.Add(item);
@@ -245,8 +349,24 @@ public partial class DockWindow : Window
         foreach (DockItem item in _dockItems)
         {
             if (item.IsSeparator) continue;
-            item.IsActive = item.Windows.Any(w => w.Handle == fgHwnd);
+            item.IsActive = item.Windows.Any(w => MatchesWindowOrProcess(w, fgHwnd));
         }
+    }
+
+    private static bool MatchesWindowOrProcess(ApplicationWindow w, IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || w.Handle == IntPtr.Zero) return false;
+        if (w.Handle == hwnd) return true;
+
+        IntPtr root = NativeMethods.GetAncestor(hwnd, NativeMethods.GA_ROOT);
+        if (root != IntPtr.Zero && w.Handle == root) return true;
+
+        IntPtr rootOwner = NativeMethods.GetAncestor(hwnd, NativeMethods.GA_ROOTOWNER);
+        if (rootOwner != IntPtr.Zero && w.Handle == rootOwner) return true;
+
+        NativeMethods.GetWindowThreadProcessId(w.Handle, out uint wPid);
+        NativeMethods.GetWindowThreadProcessId(hwnd, out uint fgPid);
+        return wPid != 0 && wPid == fgPid;
     }
 
     private static string GetPinnedItemKey(PinnedAppItem pinned)
@@ -290,6 +410,13 @@ public partial class DockWindow : Window
             return true;
         }
 
+        if (normalizedPinFile == "taskmgr.exe" &&
+            !string.IsNullOrWhiteSpace(win.Title) &&
+            win.Title.Contains("Task Manager", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
         if (!string.IsNullOrEmpty(win.AppUserModelID) &&
             win.AppUserModelID.Contains(Path.GetFileNameWithoutExtension(normalizedPinFile), StringComparison.OrdinalIgnoreCase))
         {
@@ -302,26 +429,32 @@ public partial class DockWindow : Window
     private ImageSource? GetOrLoadPinnedIcon(PinnedAppItem pinned)
     {
         string key = GetPinnedItemKey(pinned);
-        if (_iconCache.TryGetValue(key, out ImageSource? cached))
+        if (_iconCache.TryGetValue(key, out ImageSource? cached) && cached != null)
         {
             return cached;
         }
 
         ImageSource? loaded = TaskbarPinHelper.GetPinnedAppIcon(pinned);
-        _iconCache[key] = loaded;
+        if (loaded != null)
+        {
+            _iconCache[key] = loaded;
+        }
         return loaded;
     }
 
     private ImageSource? GetOrLoadPathIcon(string path)
     {
         if (string.IsNullOrWhiteSpace(path)) return null;
-        if (_iconCache.TryGetValue(path, out ImageSource? cached))
+        if (_iconCache.TryGetValue(path, out ImageSource? cached) && cached != null)
         {
             return cached;
         }
 
         ImageSource? loaded = IconHelper.ExtractIconFromPath(path);
-        _iconCache[path] = loaded;
+        if (loaded != null)
+        {
+            _iconCache[path] = loaded;
+        }
         return loaded;
     }
 
@@ -375,6 +508,7 @@ public partial class DockWindow : Window
             !WindowTracker.IsShellOrOverlayWindow(fg))
         {
             _mouseDownActiveHwnd = fg;
+            _lastForegroundAppHwnd = fg;
         }
         else
         {
@@ -382,7 +516,7 @@ public partial class DockWindow : Window
         }
     }
 
-    private void DockTile_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    private async void DockTile_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
         CloseActiveContextMenu();
         if (sender is not FrameworkElement { Tag: DockItem item }) return;
@@ -402,14 +536,13 @@ public partial class DockWindow : Window
         }
         _mouseDownActiveHwnd = IntPtr.Zero;
 
-        ApplicationWindow? activeMatch = item.Windows.FirstOrDefault(w => w.Handle == activeAppHwnd);
+        ApplicationWindow? activeMatch = item.Windows.FirstOrDefault(w => MatchesWindowOrProcess(w, activeAppHwnd));
         bool allMinimized = item.Windows.All(w => NativeMethods.IsIconic(w.Handle));
 
         if (allMinimized)
         {
             ApplicationWindow target = item.Windows[0];
-            NativeMethods.ShowWindow(target.Handle, NativeMethods.SW_RESTORE);
-            NativeMethods.SetForegroundWindow(target.Handle);
+            await RestoreAndActivateWindowAsync(target, item);
             _lastForegroundAppHwnd = target.Handle;
             _lastDockActivatedHwnd = target.Handle;
             _lastDockActivatedTick = Environment.TickCount64;
@@ -425,21 +558,157 @@ public partial class DockWindow : Window
 
         if ((activeMatch != null || wasJustActivated) && !NativeMethods.IsIconic(primaryTarget.Handle))
         {
-            NativeMethods.ShowWindow(primaryTarget.Handle, NativeMethods.SW_MINIMIZE);
+            await MinimizeWindowAsync(primaryTarget);
             _lastForegroundAppHwnd = IntPtr.Zero;
             _lastDockActivatedHwnd = IntPtr.Zero;
         }
         else
         {
-            if (NativeMethods.IsIconic(primaryTarget.Handle))
-            {
-                NativeMethods.ShowWindow(primaryTarget.Handle, NativeMethods.SW_RESTORE);
-            }
-            // Activate directly without SW_RESTORE so maximized windows stay maximized
-            NativeMethods.SetForegroundWindow(primaryTarget.Handle);
+            await RestoreAndActivateWindowAsync(primaryTarget, item);
             _lastForegroundAppHwnd = primaryTarget.Handle;
             _lastDockActivatedHwnd = primaryTarget.Handle;
             _lastDockActivatedTick = Environment.TickCount64;
+        }
+    }
+
+    private async Task MinimizeWindowAsync(ApplicationWindow target)
+    {
+        IntPtr hwnd = target.Handle;
+        if (hwnd == IntPtr.Zero) return;
+
+        NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MINIMIZE);
+        if (!NativeMethods.IsIconic(hwnd))
+        {
+            NativeMethods.ShowWindowAsync(hwnd, NativeMethods.SW_MINIMIZE);
+            NativeMethods.PostMessage(hwnd, NativeMethods.WM_SYSCOMMAND, new IntPtr(NativeMethods.SC_MINIMIZE), IntPtr.Zero);
+        }
+
+        if (!NativeMethods.IsIconic(hwnd))
+        {
+            bool sent = await SendWatchdogWindowCommandAsync($"MINIMIZE {hwnd.ToInt64()}");
+            if (sent)
+            {
+                await Task.Delay(50);
+            }
+
+            if (!NativeMethods.IsIconic(hwnd))
+            {
+                await EnsureElevatedWatchdogAndSendAsync($"MINIMIZE {hwnd.ToInt64()}");
+            }
+        }
+    }
+
+    private async Task RestoreAndActivateWindowAsync(ApplicationWindow target, DockItem item)
+    {
+        IntPtr hwnd = target.Handle;
+        if (hwnd == IntPtr.Zero) return;
+
+        bool wasIconic = NativeMethods.IsIconic(hwnd);
+        if (wasIconic)
+        {
+            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
+            if (NativeMethods.IsIconic(hwnd))
+            {
+                NativeMethods.ShowWindowAsync(hwnd, NativeMethods.SW_RESTORE);
+                NativeMethods.PostMessage(hwnd, NativeMethods.WM_SYSCOMMAND, new IntPtr(NativeMethods.SC_RESTORE), IntPtr.Zero);
+            }
+        }
+
+        NativeMethods.SetForegroundWindow(hwnd);
+        NativeMethods.SwitchToThisWindow(hwnd, true);
+
+        bool stillBlocked = (wasIconic && NativeMethods.IsIconic(hwnd)) ||
+                            !MatchesWindowOrProcess(target, NativeMethods.GetForegroundWindow());
+
+        if (stillBlocked)
+        {
+            bool sent = await SendWatchdogWindowCommandAsync($"RESTORE {hwnd.ToInt64()}");
+            if (sent)
+            {
+                await Task.Delay(50);
+            }
+
+            // Built-in Windows auto-elevated single-instance fallback for Task Manager
+            if ((wasIconic && NativeMethods.IsIconic(hwnd)) ||
+                !MatchesWindowOrProcess(target, NativeMethods.GetForegroundWindow()))
+            {
+                if (IsTaskManagerWindow(target, item))
+                {
+                    try
+                    {
+                        using var _ = Process.Start(new ProcessStartInfo
+                        {
+                            FileName = "taskmgr.exe",
+                            UseShellExecute = true
+                        });
+                        return;
+                    }
+                    catch { }
+                }
+
+                await EnsureElevatedWatchdogAndSendAsync($"RESTORE {hwnd.ToInt64()}");
+            }
+        }
+    }
+
+    private static bool IsTaskManagerWindow(ApplicationWindow target, DockItem item)
+    {
+        return (!string.IsNullOrWhiteSpace(target.WinFileName) &&
+                target.WinFileName.EndsWith("Taskmgr.exe", StringComparison.OrdinalIgnoreCase)) ||
+               (!string.IsNullOrWhiteSpace(item.ExecutablePath) &&
+                item.ExecutablePath.EndsWith("taskmgr.exe", StringComparison.OrdinalIgnoreCase)) ||
+               (!string.IsNullOrWhiteSpace(target.Title) &&
+                target.Title.Contains("Task Manager", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static async Task<bool> SendWatchdogWindowCommandAsync(string command)
+    {
+        try
+        {
+            using var client = new NamedPipeClientStream(".", WatchdogPipeName, PipeDirection.Out, PipeOptions.Asynchronous);
+            await client.ConnectAsync(80);
+            using var writer = new StreamWriter(client) { AutoFlush = true };
+            await writer.WriteLineAsync(command);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task EnsureElevatedWatchdogAndSendAsync(string command)
+    {
+        if (_hasAttemptedElevatedWatchdogLaunch) return;
+        _hasAttemptedElevatedWatchdogLaunch = true;
+
+        try
+        {
+            string baseDir = AppContext.BaseDirectory;
+            string watchdogPath = Path.Combine(baseDir, "NixanDeck.Watchdog.exe");
+            if (!File.Exists(watchdogPath)) return;
+
+            foreach (Process existing in Process.GetProcessesByName("NixanDeck.Watchdog"))
+            {
+                try { existing.Kill(); } catch { }
+                finally { existing.Dispose(); }
+            }
+
+            using var _ = Process.Start(new ProcessStartInfo
+            {
+                FileName = watchdogPath,
+                Arguments = $"--pid {Environment.ProcessId}",
+                UseShellExecute = true,
+                Verb = "runas",
+                WindowStyle = ProcessWindowStyle.Hidden
+            });
+
+            await Task.Delay(250);
+            await SendWatchdogWindowCommandAsync(command);
+        }
+        catch
+        {
+            // User declined elevation or watchdog unavailable
         }
     }
 
@@ -449,7 +718,6 @@ public partial class DockWindow : Window
 
         CloseActiveContextMenu();
 
-        // Focus DockWindow briefly so WPF ContextMenu captures outside clicks and auto-dismisses properly
         IntPtr hwnd = new WindowInteropHelper(this).Handle;
         if (hwnd != IntPtr.Zero)
         {
@@ -470,7 +738,7 @@ public partial class DockWindow : Window
             Header = item.IsRunning ? "Open / Activate" : "Open",
             Style = menuItemStyle
         };
-        openItem.Click += (_, _) =>
+        openItem.Click += async (_, _) =>
         {
             if (item.Windows.Count == 0)
             {
@@ -478,9 +746,7 @@ public partial class DockWindow : Window
             }
             else
             {
-                ApplicationWindow win = item.Windows[0];
-                if (win.IsMinimized) win.Restore();
-                win.BringToFront();
+                await RestoreAndActivateWindowAsync(item.Windows[0], item);
             }
         };
         menu.Items.Add(openItem);
@@ -505,6 +771,34 @@ public partial class DockWindow : Window
         };
         pinItem.Click += (_, _) => TogglePin(item);
         menu.Items.Add(pinItem);
+
+        if (item.IsPinned && canPin)
+        {
+            var unpinTaskbarItem = new MenuItem
+            {
+                Header = "Unpin from Taskbar",
+                Style = menuItemStyle
+            };
+            unpinTaskbarItem.Click += (_, _) =>
+            {
+                TaskbarPinHelper.UnpinFromTaskbar(item.ShortcutPath, item.ExecutablePath, item.AppUserModelId);
+                TogglePin(item);
+            };
+            menu.Items.Add(unpinTaskbarItem);
+        }
+
+        var syncPinsItem = new MenuItem
+        {
+            Header = "Sync Pins with Windows Taskbar",
+            Style = menuItemStyle
+        };
+        syncPinsItem.Click += (_, _) =>
+        {
+            _iconCache.Clear();
+            _configManager.SyncWithTaskbarPins(replaceWithTaskbar: true);
+            RebuildDockItems();
+        };
+        menu.Items.Add(syncPinsItem);
 
         if (item.IsRunning && item.Windows.Count > 0)
         {
@@ -621,7 +915,9 @@ public partial class DockWindow : Window
         if (_shouldAutoHide)
         {
             BottomHoverStrip.Visibility = Visibility.Visible;
-            if (!DockRoot.IsMouseOver && (_activeContextMenu == null || !_activeContextMenu.IsOpen))
+            if (!DockRoot.IsMouseOver &&
+                !IsCursorOverVisibleDock() &&
+                (_activeContextMenu == null || !_activeContextMenu.IsOpen))
             {
                 SetDockSlideHidden(true);
             }
@@ -631,6 +927,7 @@ public partial class DockWindow : Window
             _revealTimer.Stop();
             _hideDelayTimer.Stop();
             BottomHoverStrip.Visibility = Visibility.Collapsed;
+            DwmHelper.EnsureTopmost(this);
             SetDockSlideHidden(false);
         }
     }
@@ -639,6 +936,10 @@ public partial class DockWindow : Window
     {
         _isFullscreenHidden = isFullscreen;
         Visibility = _isFullscreenHidden ? Visibility.Collapsed : Visibility.Visible;
+        if (!_isFullscreenHidden)
+        {
+            DwmHelper.EnsureTopmost(this);
+        }
     }
 
     private void BottomHoverStrip_MouseEnter(object sender, MouseEventArgs e)

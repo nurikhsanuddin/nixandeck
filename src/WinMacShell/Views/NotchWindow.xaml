@@ -47,7 +47,16 @@
         <Geometry x:Key="IconSparkle">M10,2 L11.8,7.2 L17,9 L11.8,10.8 L10,16 L8.2,10.8 L3,9 L8.2,7.2 Z</Geometry>
         <Geometry x:Key="IconChevronLeft">M12,4 L6,10 L12,16</Geometry>
         <Geometry x:Key="IconChevronRight">M8,4 L14,10 L8,16</Geometry>
+        <Geometry x:Key="IconChevronDown">M4.5,7.5 L10,13 L15.5,7.5</Geometry>
+        <Geometry x:Key="IconChevronUp">M4.5,12.5 L10,7 L15.5,12.5</Geometry>
         <Geometry x:Key="IconClose">M5,5 L15,15 M15,5 L5,15</Geometry>
+        <Geometry x:Key="IconWifiOuter">M1,6 C5.5,1.8 12.5,1.8 17,6</Geometry>
+        <Geometry x:Key="IconWifiMid">M3.6,8.8 C6.7,5.8 11.3,5.8 14.4,8.8</Geometry>
+        <Geometry x:Key="IconWifiInner">M6.4,11.6 C8,10.1 10,10.1 11.6,11.6 M9,14.2 A0.9,0.9 0 1,1 8.99,14.2 Z</Geometry>
+        <Geometry x:Key="IconWifiOffline">M1,6 C5.5,1.8 12.5,1.8 17,6 M3.6,8.8 C6.7,5.8 11.3,5.8 14.4,8.8 M6.4,11.6 C8,10.1 10,10.1 11.6,11.6 M3,3 L15,15</Geometry>
+        <Geometry x:Key="IconEthernet">M3,4.5 H9 V8.5 H3 Z M11,11.5 H17 V15.5 H11 Z M6,8.5 V13.5 H11 M14,11.5 V6.5 H9</Geometry>
+        <Geometry x:Key="IconHotspot">M5,6.5 A6.5,6.5 0 0,1 15,6.5 M7.2,9 A3.5,3.5 0 0,1 12.8,9 M10,11.5 A1.2,1.2 0 1,1 9.99,11.5 Z M10,12.7 V17</Geometry>
+        <Geometry x:Key="IconLock">M5,9.5 H15 V16.5 H5 Z M7,9.5 V6.8 A3,3 0 0,1 13,6.8 V9.5</Geometry>
     </Window.Resources>
 
     <Grid Background="{x:Null}">
@@ -190,104 +199,94 @@
                     </Button>
                 </StackPanel>
 
-                <!-- RIGHT: System Tray + Wi-Fi + Volume + Battery + Clock/Hub -->
+                <!-- RIGHT: System Tray Dropdown + Wi-Fi/Ethernet + Brightness + Volume + Battery + Clock/Hub -->
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                    <!-- Compact System Tray -->
-                    <Button Style="{StaticResource ShellIconButtonStyle}"
-                            Width="18"
-                            Height="22"
-                            Padding="4"
-                            Click="TrayScrollLeft_Click"
-                            ToolTip="Scroll Tray Left">
-                        <Path Data="{StaticResource IconChevronLeft}"
-                              Stroke="{StaticResource SecondaryTextBrush}"
-                              StrokeThickness="1.5"
-                              Stretch="Uniform"/>
-                    </Button>
-
-                    <ScrollViewer x:Name="TrayScrollViewer"
-                                  MaxWidth="180"
-                                  HorizontalScrollBarVisibility="Hidden"
-                                  VerticalScrollBarVisibility="Disabled"
-                                  VerticalAlignment="Center"
-                                  PreviewMouseWheel="TrayScrollViewer_PreviewMouseWheel">
-                        <ItemsControl x:Name="TrayIconsControl">
-                            <ItemsControl.ItemsPanel>
-                                <ItemsPanelTemplate>
-                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center"/>
-                                </ItemsPanelTemplate>
-                            </ItemsControl.ItemsPanel>
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <Border Width="22"
-                                            Height="22"
-                                            Margin="1,0"
-                                            CornerRadius="5"
-                                            Background="Transparent"
-                                            Cursor="Hand"
-                                            Tag="{Binding}"
-                                            ToolTip="{Binding Title}"
-                                            MouseEnter="TrayIcon_MouseEnter"
-                                            MouseLeave="TrayIcon_MouseLeave"
-                                            MouseDown="TrayIcon_MouseDown"
-                                            MouseUp="TrayIcon_MouseUp">
-                                        <Border.Style>
-                                            <Style TargetType="Border">
-                                                <Style.Triggers>
-                                                    <Trigger Property="IsMouseOver" Value="True">
-                                                        <Setter Property="Background" Value="{StaticResource HoverSurfaceBrush}"/>
-                                                    </Trigger>
-                                                </Style.Triggers>
-                                            </Style>
-                                        </Border.Style>
-                                        <Image Source="{Binding Icon}"
-                                               Width="15"
-                                               Height="15"
-                                               Stretch="Uniform"
-                                               RenderOptions.BitmapScalingMode="HighQuality"
-                                               HorizontalAlignment="Center"
-                                               VerticalAlignment="Center"/>
-                                    </Border>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-                    </ScrollViewer>
-
-                    <Button Style="{StaticResource ShellIconButtonStyle}"
-                            Width="18"
-                            Height="22"
-                            Padding="4"
-                            Click="TrayScrollRight_Click"
-                            ToolTip="Scroll Tray Right">
-                        <Path Data="{StaticResource IconChevronRight}"
-                              Stroke="{StaticResource SecondaryTextBrush}"
-                              StrokeThickness="1.5"
-                              Stretch="Uniform"/>
-                    </Button>
-
-                    <Border Width="1" Height="13" Background="#28FFFFFF" Margin="5,0"/>
-
-                    <!-- Interactive Wi-Fi Button (Icon Only) -->
-                    <Button x:Name="TopWifiButton"
+                    <!-- Windows-Style System Tray Overflow Dropdown Toggle -->
+                    <Button x:Name="TopTrayDropdownButton"
                             Style="{StaticResource ShellIconButtonStyle}"
                             Width="26"
                             Height="24"
-                            Padding="5"
-                            ToolTip="Click: Wi-Fi Flyout | Right-Click: Network Settings"
-                            PreviewMouseLeftButtonDown="TopWifi_PreviewMouseDown"
-                            Click="TopWifi_Click"
-                            MouseRightButtonUp="TopWifi_RightClick">
-                        <Path x:Name="TopWifiIcon"
-                              Data="{StaticResource IconWifi}"
+                            Padding="6"
+                            Click="TopTrayDropdown_Click"
+                            ToolTip="Show Hidden Icons (System Tray)">
+                        <Path x:Name="TopTrayChevronPath"
+                              Data="{StaticResource IconChevronDown}"
                               Stroke="{StaticResource PrimaryTextBrush}"
-                              StrokeThickness="1.5"
+                              StrokeThickness="1.6"
                               StrokeStartLineCap="Round"
                               StrokeEndLineCap="Round"
-                              Width="14"
+                              Width="11"
                               Height="11"
                               Stretch="Uniform"
                               HorizontalAlignment="Center"
                               VerticalAlignment="Center"/>
+                    </Button>
+
+                    <Border Width="1" Height="13" Background="#28FFFFFF" Margin="4,0"/>
+
+                    <!-- Real-Time Interactive Wi-Fi / Ethernet Button (Dynamic Signal Bars & Connection Kind) -->
+                    <Button x:Name="TopWifiButton"
+                            Style="{StaticResource ShellIconButtonStyle}"
+                            Width="26"
+                            Height="24"
+                            Padding="4.5"
+                            ToolTip="Click: Network Flyout | Right-Click: Network Settings"
+                            PreviewMouseLeftButtonDown="TopWifi_PreviewMouseDown"
+                            Click="TopWifi_Click"
+                            MouseRightButtonUp="TopWifi_RightClick">
+                        <Grid Width="15" Height="13" HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <!-- Wi-Fi 3-Bar Signal Strength View -->
+                            <Viewbox x:Name="TopWifiBarsPanel" Stretch="Uniform" Visibility="Visible">
+                                <Canvas Width="18" Height="16">
+                                    <Path x:Name="WifiOuterArc"
+                                          Data="{StaticResource IconWifiOuter}"
+                                          Stroke="{StaticResource PrimaryTextBrush}"
+                                          StrokeThickness="1.55"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"/>
+                                    <Path x:Name="WifiMidArc"
+                                          Data="{StaticResource IconWifiMid}"
+                                          Stroke="{StaticResource PrimaryTextBrush}"
+                                          StrokeThickness="1.55"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"/>
+                                    <Path x:Name="WifiInnerArc"
+                                          Data="{StaticResource IconWifiInner}"
+                                          Stroke="{StaticResource PrimaryTextBrush}"
+                                          StrokeThickness="1.55"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"/>
+                                </Canvas>
+                            </Viewbox>
+
+                            <!-- Ethernet Connected View -->
+                            <Path x:Name="TopEthernetIcon"
+                                  Visibility="Collapsed"
+                                  Data="{StaticResource IconEthernet}"
+                                  Stroke="{StaticResource PrimaryTextBrush}"
+                                  StrokeThickness="1.45"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round"
+                                  Width="14"
+                                  Height="12"
+                                  Stretch="Uniform"
+                                  HorizontalAlignment="Center"
+                                  VerticalAlignment="Center"/>
+
+                            <!-- Offline View -->
+                            <Path x:Name="TopWifiOfflineIcon"
+                                  Visibility="Collapsed"
+                                  Data="{StaticResource IconWifiOffline}"
+                                  Stroke="{StaticResource WarningBrush}"
+                                  StrokeThickness="1.5"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round"
+                                  Width="14"
+                                  Height="12"
+                                  Stretch="Uniform"
+                                  HorizontalAlignment="Center"
+                                  VerticalAlignment="Center"/>
+                        </Grid>
                     </Button>
 
                     <!-- Interactive Brightness Button (Icon Only, toggles Brightness Slider popup) -->
@@ -527,8 +526,8 @@
                         </Grid>
                     </Grid>
 
-                    <!-- State C: Compact Notification Toast View (336x64, crisp emoji rendering, NO blue dot) -->
-                    <Grid x:Name="ToastView" Visibility="Collapsed" Margin="14,8,12,8">
+                    <!-- State C: Enlarged Readable Notification Toast View (424x84, crisp emoji rendering, 2-line body) -->
+                    <Grid x:Name="ToastView" Visibility="Collapsed" Margin="16,10,14,10">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
@@ -536,9 +535,9 @@
                         </Grid.ColumnDefinitions>
 
                         <Border Grid.Column="0"
-                                Width="34"
-                                Height="34"
-                                CornerRadius="9"
+                                Width="42"
+                                Height="42"
+                                CornerRadius="11"
                                 Background="#1BFFFFFF"
                                 ClipToBounds="True"
                                 VerticalAlignment="Center">
@@ -547,48 +546,49 @@
                                       Data="{StaticResource IconBell}"
                                       Stroke="{StaticResource SecondaryTextBrush}"
                                       StrokeThickness="1.5"
-                                      Width="15"
-                                      Height="15"
+                                      Width="18"
+                                      Height="18"
                                       Stretch="Uniform"
                                       HorizontalAlignment="Center"
                                       VerticalAlignment="Center"/>
                                 <Image x:Name="ToastAppIcon" Stretch="UniformToFill" RenderOptions.BitmapScalingMode="HighQuality">
                                     <Image.Clip>
-                                        <RectangleGeometry RadiusX="9" RadiusY="9" Rect="0,0,34,34"/>
+                                        <RectangleGeometry RadiusX="11" RadiusY="11" Rect="0,0,42,42"/>
                                     </Image.Clip>
                                 </Image>
                             </Grid>
                         </Border>
 
-                        <StackPanel Grid.Column="1" Margin="10,0,8,0" VerticalAlignment="Center">
-                            <DockPanel>
+                        <StackPanel Grid.Column="1" Margin="12,0,10,0" VerticalAlignment="Center">
+                            <DockPanel Margin="0,0,0,1">
                                 <TextBlock x:Name="ToastAppName"
                                            Text="App"
                                            FontFamily="{StaticResource AppFontFamily}"
-                                           FontSize="9.5"
+                                           FontSize="10.5"
                                            FontWeight="SemiBold"
-                                           Foreground="#FF8B949E"/>
+                                           Foreground="#FFB0B8C4"/>
                                 <TextBlock x:Name="ToastTimeText"
                                            Text="09:00"
-                                           Margin="6,0,0,0"
+                                           Margin="8,0,0,0"
                                            FontFamily="{StaticResource AppFontFamily}"
-                                           FontSize="9.5"
-                                           Foreground="#FF6E7681"/>
+                                           FontSize="10.5"
+                                           Foreground="#FF8B949E"/>
                             </DockPanel>
                             <TextBlock x:Name="ToastTitleText"
                                        Text="Notification Title"
                                        FontFamily="{StaticResource AppFontFamily}"
-                                       FontSize="11.5"
-                                       FontWeight="SemiBold"
+                                       FontSize="13"
+                                       FontWeight="Bold"
                                        Foreground="{StaticResource PrimaryTextBrush}"
                                        TextTrimming="CharacterEllipsis"/>
                             <TextBlock x:Name="ToastBodyText"
                                        Text="Notification message body"
+                                       Margin="0,1,0,0"
                                        FontFamily="{StaticResource AppFontFamily}"
-                                       FontSize="10.5"
-                                       Foreground="{StaticResource SecondaryTextBrush}"
-                                       TextWrapping="NoWrap"
-                                       MaxHeight="16"
+                                       FontSize="11.5"
+                                       Foreground="#FFD4D4D8"
+                                       TextWrapping="Wrap"
+                                       MaxHeight="34"
                                        TextTrimming="CharacterEllipsis"/>
                         </StackPanel>
 
@@ -692,9 +692,23 @@
                                         Height="22"
                                         Padding="5"
                                         Margin="0,0,2,0"
-                                        ToolTip="Bluetooth Settings"
-                                        Click="QuickBluetooth_Click">
-                                    <Path Data="{StaticResource IconBluetooth}"
+                                        ToolTip="Night Light Settings"
+                                        Click="QuickNightLight_Click">
+                                    <Path Data="{StaticResource IconSun}"
+                                          Stroke="{StaticResource SecondaryTextBrush}"
+                                          StrokeThickness="1.4"
+                                          Stretch="Uniform"/>
+                                </Button>
+
+                                <Button Style="{StaticResource ShellIconButtonStyle}"
+                                        Width="22"
+                                        Height="22"
+                                        Padding="4.5"
+                                        Margin="0,0,2,0"
+                                        ToolTip="Mobile Hotspot (Right-click: Network Settings)"
+                                        Click="QuickHotspot_Click"
+                                        MouseRightButtonUp="TopWifi_RightClick">
+                                    <Path Data="{StaticResource IconHotspot}"
                                           Stroke="{StaticResource SecondaryTextBrush}"
                                           StrokeThickness="1.4"
                                           StrokeStartLineCap="Round"
@@ -707,24 +721,13 @@
                                         Height="22"
                                         Padding="5"
                                         Margin="0,0,2,0"
-                                        ToolTip="Night Light"
-                                        Click="QuickNightLight_Click">
-                                    <Path Data="{StaticResource IconSun}"
+                                        ToolTip="Lock PC (Win+L)"
+                                        Click="QuickLockScreen_Click">
+                                    <Path Data="{StaticResource IconLock}"
                                           Stroke="{StaticResource SecondaryTextBrush}"
                                           StrokeThickness="1.4"
-                                          Stretch="Uniform"/>
-                                </Button>
-
-                                <Button Style="{StaticResource ShellIconButtonStyle}"
-                                        Width="22"
-                                        Height="22"
-                                        Padding="5"
-                                        Margin="0,0,2,0"
-                                        ToolTip="Screen Snip"
-                                        Click="QuickSnip_Click">
-                                    <Path Data="{StaticResource IconSnip}"
-                                          Stroke="{StaticResource SecondaryTextBrush}"
-                                          StrokeThickness="1.4"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"
                                           Stretch="Uniform"/>
                                 </Button>
 
@@ -849,7 +852,7 @@
                                             Margin="3,0"
                                             Click="QuickDnd_Click"
                                             MouseRightButtonUp="QuickDnd_RightClick"
-                                            ToolTip="Focus / Do Not Disturb (Right-click: Focus Settings)">
+                                            ToolTip="Click: Toggle Do Not Disturb (DND) | Right-Click: DND Settings">
                                         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
                                             <Path x:Name="QuickDndIcon"
                                                   Data="{StaticResource IconMoon}"
@@ -860,11 +863,11 @@
                                                   Stretch="Uniform"
                                                   HorizontalAlignment="Center"/>
                                             <TextBlock x:Name="QuickDndText"
-                                                       Text="Focus"
+                                                       Text="DND"
                                                        Margin="0,5,0,0"
                                                        FontFamily="{StaticResource AppFontFamily}"
                                                        FontSize="10"
-                                                       FontWeight="Medium"
+                                                       FontWeight="SemiBold"
                                                        Foreground="{StaticResource SecondaryTextBrush}"
                                                        HorizontalAlignment="Center"/>
                                         </StackPanel>
@@ -875,7 +878,7 @@
                                             Margin="3,0"
                                             Click="QuickProject_Click"
                                             MouseRightButtonUp="QuickProject_RightClick"
-                                            ToolTip="Screen Mirror / Project (Right-click: Display Settings)">
+                                            ToolTip="Screen Mirror / Project (Right-Click: Display Settings)">
                                         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
                                             <Path Data="{StaticResource IconMirror}"
                                                   Stroke="{StaticResource PrimaryTextBrush}"
@@ -894,23 +897,29 @@
                                         </StackPanel>
                                     </Button>
 
-                                    <Button Style="{StaticResource RoundedTileButtonStyle}"
+                                    <Button x:Name="QuickBluetoothButton"
+                                            Style="{StaticResource RoundedTileButtonStyle}"
                                             Height="66"
                                             Margin="3,0"
-                                            Click="QuickNightLight_Click"
-                                            ToolTip="Night Light Settings">
+                                            Click="QuickBluetooth_Click"
+                                            MouseRightButtonUp="QuickBluetooth_RightClick"
+                                            ToolTip="Click: Toggle Bluetooth On/Off | Right-Click: Bluetooth Settings">
                                         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
-                                            <Path Data="{StaticResource IconSun}"
+                                            <Path x:Name="QuickBluetoothIcon"
+                                                  Data="{StaticResource IconBluetooth}"
                                                   Stroke="{StaticResource PrimaryTextBrush}"
-                                                  StrokeThickness="1.4"
+                                                  StrokeThickness="1.5"
+                                                  StrokeStartLineCap="Round"
+                                                  StrokeEndLineCap="Round"
                                                   Width="15"
                                                   Height="15"
                                                   Stretch="Uniform"
                                                   HorizontalAlignment="Center"/>
-                                            <TextBlock Text="Night"
+                                            <TextBlock x:Name="QuickBluetoothText"
+                                                       Text="Bluetooth"
                                                        Margin="0,5,0,0"
                                                        FontFamily="{StaticResource AppFontFamily}"
-                                                       FontSize="10"
+                                                       FontSize="9.5"
                                                        FontWeight="Medium"
                                                        Foreground="{StaticResource SecondaryTextBrush}"
                                                        HorizontalAlignment="Center"/>
@@ -921,7 +930,8 @@
                                             Height="66"
                                             Margin="3,0"
                                             Click="QuickSnip_Click"
-                                            ToolTip="Screen Snip">
+                                            MouseRightButtonUp="QuickSnip_RightClick"
+                                            ToolTip="Click: Screen Snip | Right-Click: Snipping Tool">
                                         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
                                             <Path Data="{StaticResource IconSnip}"
                                                   Stroke="{StaticResource PrimaryTextBrush}"
@@ -1078,6 +1088,66 @@
                 </Grid>
             </Grid>
             </Grid>
+        </Border>
+
+        <!-- 3. WINDOWS-STYLE SYSTEM TRAY OVERFLOW DROPDOWN (Toggled by TopTrayDropdownButton) -->
+        <Border x:Name="TrayPopupShell"
+                MinWidth="156"
+                MaxWidth="216"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Top"
+                Margin="0,34,195,0"
+                Visibility="Collapsed"
+                Background="#F8050508"
+                BorderBrush="#2EFFFFFF"
+                BorderThickness="1"
+                CornerRadius="14"
+                Padding="8"
+                Effect="{StaticResource NotchShadowEffect}">
+            <Border.RenderTransform>
+                <TranslateTransform x:Name="TrayPopupSlideTransform" Y="-8"/>
+            </Border.RenderTransform>
+
+            <ItemsControl x:Name="TrayIconsControl">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <UniformGrid Columns="4"/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border Width="36"
+                                Height="36"
+                                Margin="2"
+                                CornerRadius="8"
+                                Background="Transparent"
+                                Cursor="Hand"
+                                Tag="{Binding}"
+                                ToolTip="{Binding Title}"
+                                MouseEnter="TrayIcon_MouseEnter"
+                                MouseLeave="TrayIcon_MouseLeave"
+                                MouseDown="TrayIcon_MouseDown"
+                                MouseUp="TrayIcon_MouseUp">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Style.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter Property="Background" Value="{StaticResource HoverSurfaceBrush}"/>
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
+                            <Image Source="{Binding Icon}"
+                                   Width="18"
+                                   Height="18"
+                                   Stretch="Uniform"
+                                   RenderOptions.BitmapScalingMode="HighQuality"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"/>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
         </Border>
 
         <!-- 4. DEDICATED VOLUME SLIDER POPOVER (Toggled exclusively by Volume button) -->

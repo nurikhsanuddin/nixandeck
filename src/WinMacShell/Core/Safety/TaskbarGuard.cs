@@ -158,6 +158,8 @@ public sealed class TaskbarGuard : IDisposable
         _appBarRegistered = false;
     }
 
+    private int GetReservedTopPx() => Math.Max(1, (int)Math.Floor(TopBarHeightDip * _dpiScaleY) - 1);
+
     private void ApplyTopMenuBarWorkArea()
     {
         if (_isApplyingWorkArea) return;
@@ -181,7 +183,7 @@ public sealed class TaskbarGuard : IDisposable
                 return;
             }
 
-            int reservedTopPx = (int)Math.Ceiling(TopBarHeightDip * _dpiScaleY);
+            int reservedTopPx = GetReservedTopPx();
 
             EnsureTopAppBarRegistered();
             if (_appBarRegistered && _hotkeyHwnd != IntPtr.Zero)
@@ -276,12 +278,12 @@ public sealed class TaskbarGuard : IDisposable
         int rightBorder = winRect.Right - frameRect.Right;
         int bottomBorder = winRect.Bottom - frameRect.Bottom;
 
-        int reservedTopPx = (int)Math.Ceiling(TopBarHeightDip * _dpiScaleY);
+        int reservedTopPx = GetReservedTopPx();
         int minTop = mi.rcMonitor.Top + reservedTopPx;
 
         if (NativeMethods.IsZoomed(hwnd))
         {
-            if (Math.Abs(frameRect.Top - minTop) > 2 || Math.Abs(frameRect.Bottom - mi.rcMonitor.Bottom) > 2)
+            if (Math.Abs(frameRect.Top - minTop) > 1 || Math.Abs(frameRect.Bottom - mi.rcMonitor.Bottom) > 1)
             {
                 int targetX = mi.rcMonitor.Left - leftBorder;
                 int targetY = minTop - topBorder;
