@@ -1,0 +1,134 @@
+<Window x:Class="WinMacShell.Views.DockWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="WinMacShell Dock"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="{x:Null}"
+        Topmost="True"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize"
+        SizeToContent="WidthAndHeight"
+        UseLayoutRounding="True"
+        MouseEnter="DockRoot_MouseEnter"
+        MouseLeave="DockRoot_MouseLeave">
+
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+    </Window.Resources>
+
+    <!-- Continuous near-invisible hit bridge so moving between bottom edge and Dock never breaks hover -->
+    <Grid x:Name="DockRoot" Background="#01000000">
+        <!-- Main Floating Clean Translucent Glass Dock -->
+        <Border x:Name="DockContainer"
+                Margin="16,20,16,6"
+                Background="{StaticResource DockBackgroundBrush}"
+                BorderBrush="{StaticResource DockBorderBrush}"
+                BorderThickness="1"
+                CornerRadius="16"
+                Effect="{StaticResource DockShadowEffect}"
+                MouseMove="DockContainer_MouseMove"
+                MouseLeave="DockContainer_MouseLeave">
+            <Border.RenderTransform>
+                <TranslateTransform x:Name="DockSlideTransform" Y="0"/>
+            </Border.RenderTransform>
+
+            <ItemsControl x:Name="DockItemsControl" Margin="8,6,8,5">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center"/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Grid>
+                            <!-- Vertical Separator -->
+                            <Border x:Name="SeparatorLine"
+                                    Width="1"
+                                    Height="24"
+                                    Margin="4,0"
+                                    Background="{StaticResource SeparatorBrush}"
+                                    VerticalAlignment="Center"
+                                    Visibility="Collapsed"/>
+
+                            <!-- App Icon Tile -->
+                            <Grid x:Name="IconTile"
+                                  Margin="3.5,0"
+                                  Cursor="Hand"
+                                  Background="Transparent"
+                                  Tag="{Binding}"
+                                  PreviewMouseLeftButtonDown="DockTile_PreviewMouseLeftButtonDown"
+                                  MouseLeftButtonUp="DockTile_MouseLeftButtonUp"
+                                  MouseRightButtonUp="DockTile_MouseRightButtonUp">
+                                <Grid.ToolTip>
+                                    <ToolTip Placement="Top"
+                                             VerticalOffset="-10"
+                                             Background="#EE141418"
+                                             BorderBrush="#33FFFFFF"
+                                             BorderThickness="1"
+                                             Foreground="{StaticResource PrimaryTextBrush}"
+                                             Padding="8,4">
+                                        <TextBlock Text="{Binding Title}"
+                                                   FontFamily="{StaticResource AppFontFamily}"
+                                                   FontSize="11.5"
+                                                   FontWeight="Medium"/>
+                                    </ToolTip>
+                                </Grid.ToolTip>
+
+                                <StackPanel Orientation="Vertical" HorizontalAlignment="Center">
+                                    <Border Width="36"
+                                            Height="36"
+                                            CornerRadius="9.5"
+                                            Background="#14FFFFFF"
+                                            BorderBrush="#22FFFFFF"
+                                            BorderThickness="0.8"
+                                            RenderTransformOrigin="0.5,1.0">
+                                        <Border.CacheMode>
+                                            <BitmapCache/>
+                                        </Border.CacheMode>
+                                        <Border.RenderTransform>
+                                            <ScaleTransform ScaleX="{Binding Scale}" ScaleY="{Binding Scale}"/>
+                                        </Border.RenderTransform>
+
+                                        <Image Source="{Binding Icon}"
+                                               Width="26"
+                                               Height="26"
+                                               Stretch="Uniform"
+                                               RenderOptions.BitmapScalingMode="HighQuality"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"/>
+                                    </Border>
+
+                                    <!-- Running Indicator Dot -->
+                                    <Ellipse Width="3.5"
+                                             Height="3.5"
+                                             Margin="0,3,0,0"
+                                             HorizontalAlignment="Center"
+                                             Fill="#FFFFFFFF"
+                                             Visibility="{Binding IsRunning, Converter={StaticResource BoolToVis}}"/>
+                                </StackPanel>
+                            </Grid>
+                        </Grid>
+
+                        <DataTemplate.Triggers>
+                            <DataTrigger Binding="{Binding IsSeparator}" Value="True">
+                                <Setter TargetName="SeparatorLine" Property="Visibility" Value="Visible"/>
+                                <Setter TargetName="IconTile" Property="Visibility" Value="Collapsed"/>
+                            </DataTrigger>
+                        </DataTemplate.Triggers>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </Border>
+
+        <!-- 6px Invisible Hover Strip at the very bottom edge when Smart Auto-Hide is active -->
+        <Border x:Name="BottomHoverStrip"
+                Height="6"
+                VerticalAlignment="Bottom"
+                Background="#01000000"
+                Visibility="Collapsed"
+                MouseEnter="BottomHoverStrip_MouseEnter"
+                MouseMove="BottomHoverStrip_MouseEnter"/>
+    </Grid>
+</Window>

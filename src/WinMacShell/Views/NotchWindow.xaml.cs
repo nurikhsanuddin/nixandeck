@@ -1,0 +1,1462 @@
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Media.Effects;
+using System.Windows.Threading;
+using ManagedShell.WindowsTasks;
+using ManagedShell.WindowsTray;
+using WinMacShell.Core.Interop;
+using WinMacShell.Core.Safety;
+using WinMacShell.Core.Services;
+using WinMacShell.Models;
+
+namespace WinMacShell.Views;
+
+public partial class NotchWindow : Window
+{
+    private enum DynamicIslandState
+    {
+        Idle,
+        MediaPill,
+        NotificationToast,
+        ExpandedHub
+    }
+
+    private readonly MediaService _mediaService;
+    private readonly SystemStatusService _systemStatusService;
+    private readonly ShellService _shellService;
+    private readonly NotificationService _notificationService;
+    private readonly WindowTracker _windowTracker;
+    private readonly TaskbarGuard _taskbarGuard;
+
+    private readonly DispatcherTimer _clockAlignmentTimer;
+    private readonly DispatcherTimer _toastAutoCollapseTimer;
+    private readonly DispatcherTimer _hubHoverOpenTimer;
+    private readonly DispatcherTimer _hubHoverCloseTimer;
+    private readonly Storyboard? _visualizerStoryboard;
+
+    private DynamicIslandState _islandState = DynamicIslandState.Idle;
+    private ContextMenu? _activeContextMenu;
+    private bool _isPlayingMedia;
+    private bool _isUpdatingVolumeSlider;
+    private bool _isUpdatingBrightnessSlider;
+    private bool _isCenterHubOpen;
+    private bool _isVolumePopupOpen;
+    private bool _isBrightnessPopupOpen;
+    private bool _isClockPopupOpen;
+    private bool _showingAlertsTab;
+    private bool _isFullscreenHidden;
+    private bool _isStartMenuOpen;
+    private bool _isWifiFlyoutOpen;
+    private bool _suppressNextStartClick;
+    private bool _suppressNextWifiClick;
+    private DateTime _displayedCalendarMonth = new(DateTime.Now.Year, DateTime.Now.Month, 1);
+    private uint _activeToastNotificationId;
+    private bool _activeToastIsAlarm;
+    private NotificationItem? _lastToastItem;
+    private long _startOpenedTick;
+    private long _lastStartDismissByButtonTick;
+    private long _wifiOpenedTick;
+    private long _lastWifiDismissByButtonTick;
+    private ulong _prevIdleTime;
+    private ulong _prevKernelTime;
+    private ulong _prevUserTime;
+
+    public event EventHandler<Window>? SourceInitializedReady;
+
+    public NotchWindow(
+        MediaService mediaService,
+        SystemStatusService systemStatusService,
+        ShellService shellService,
+        NotificationService notificationService,
+        WindowTracker windowTracker,
+        TaskbarGuard taskbarGuard)
+    {
+        _mediaService = mediaService;
+        _systemStatusService = systemStatusService;
+        _shellService = shellService;
+        _notificationService = notificationService;
+        _windowTracker = windowTracker;
+        _taskbarGuard = taskbarGuard;
+
+        InitializeComponent();
+
+        _visualizerStoryboard = TryFindResource("VisualizerStoryboard") as Storyboard;
+
+        // Allowed timer #1: 2-second lightweight telemetry & clock tick (CPU/RAM + minute-checked calendar/clock)
+        _clockAlignmentTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromSeconds(2)
+        };
+        _clockAlignmentTimer.Tick += (_, _) =>
+        {
+            UpdateClockText();
+            UpdateCpuRamMetrics();
+        };
+
+        // Allowed timer #2: Notification toast auto-collapse (4500ms)
+        _toastAutoCollapseTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(4500) };
+        _toastAutoCollapseTimer.Tick += (_, _) =>
+        {
+            _toastAutoCollapseTimer.Stop();
+            if (_islandState == DynamicIslandState.NotificationToast && !DynamicIslandShell.IsMouseOver)
+            {
+                TransitionDynamicIsland(GetDefaultIslandState());
+            }
+        };
+
+        // Allowed UI hover timers for unified morphing Dynamic Island -> Expanded Hub
+        _hubHoverOpenTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(130) };
+        _hubHoverOpenTimer.Tick += (_, _) =>
+        {
+            _hubHoverOpenTimer.Stop();
+            if (DynamicIslandShell.IsMouseOver &&
+                !_isCenterHubOpen &&
+                _islandState != DynamicIslandState.NotificationToast &&
+                (_activeContextMenu == null || !_activeContextMenu.IsOpen))
+            {
+                SetCenterHubOpen(true);
+            }
+        };
+
+        _hubHoverCloseTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(260) };
+        _hubHoverCloseTimer.Tick += (_, _) =>
+        {
+            _hubHoverCloseTimer.Stop();
+            if (!DynamicIslandShell.IsMouseOver &&
+                _isCenterHubOpen &&
+                (_activeContextMenu == null || !_activeContextMenu.IsOpen))
+            {
+                SetCenterHubOpen(false);
+            }
+        };
+
+        _mediaService.MediaStateChanged += (_, snapshot) => Dispatcher.BeginInvoke(() => ApplyMediaSnapshot(snapshot));
+        _systemStatusService.StatusChanged += (_, status) => Dispatcher.BeginInvoke(() => ApplySystemStatus(status));
+        _notificationService.NotificationReceived += (_, item) => Dispatcher.BeginInvoke(() => OnNotificationReceived(item));
+        _notificationService.HistoryChanged += (_, _) => Dispatcher.BeginInvoke(RefreshNotificationDrawer);
+        _windowTracker.FullscreenChanged += (_, fs) => Dispatcher.BeginInvoke(() => OnFullscreenChanged(fs));
+        _windowTracker.ForegroundChanged += (_, hwnd) => Dispatcher.BeginInvoke(() =>
+        {
+            IntPtr myHwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd != myHwnd)
+            {
+                if (_isStartMenuOpen && Environment.TickCount64 - _startOpenedTick >= 650)
+                {
+                    if (WindowsStartButton.IsMouseOver)
+                    {
+                        _lastStartDismissByButtonTick = Environment.TickCount64;
+                    }
+                    else if (!WindowTracker.IsStartMenuWindow(hwnd))
+                    {
+                        _isStartMenuOpen = false;
+                    }
+                }
+
+                if (_isWifiFlyoutOpen && Environment.TickCount64 - _wifiOpenedTick >= 650)
+                {
+                    if (TopWifiButton.IsMouseOver)
+                    {
+                        _lastWifiDismissByButtonTick = Environment.TickCount64;
+                    }
+                    else if (!WindowTracker.IsQuickSettingsWindow(hwnd))
+                    {
+                        _isWifiFlyoutOpen = false;
+                    }
+                }
+            }
+
+            CloseTransientPopups();
+            if (!_isFullscreenHidden)
+            {
+                DwmHelper.EnsureTopmost(this);
+            }
+        });
+
+        Deactivated += (_, _) => CloseTransientPopups();
+
+        Loaded += (_, _) =>
+        {
+            PositionTopBar();
+            UpdateClockText();
+            RenderMonthCalendar(_displayedCalendarMonth);
+            UpdateCpuRamMetrics();
+            _clockAlignmentTimer.Start();
+            ApplyMediaSnapshot(_mediaService.CurrentState);
+            ApplySystemStatus(_systemStatusService.CurrentStatus);
+            TrayIconsControl.ItemsSource = _shellService.NotificationArea.TrayIcons;
+            RefreshNotificationDrawer();
+        };
+
+        Closed += (_, _) =>
+        {
+            _clockAlignmentTimer.Stop();
+            _toastAutoCollapseTimer.Stop();
+            _hubHoverOpenTimer.Stop();
+            _hubHoverCloseTimer.Stop();
+            _visualizerStoryboard?.Stop();
+        };
+    }
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        DwmHelper.ConfigureShellOverlayWindow(this, enableAcrylic: false, noActivate: true);
+        _windowTracker.AddIgnoredWindow(new WindowInteropHelper(this).Handle);
+        PositionTopBar();
+        SourceInitializedReady?.Invoke(this, this);
+    }
+
+    private void PositionTopBar()
+    {
+        _ = VisualTreeHelper.GetDpi(this);
+        Left = 0;
+        Top = 0;
+        Width = SystemParameters.PrimaryScreenWidth;
+    }
+
+    private void UpdateClockText()
+    {
+        DateTime now = DateTime.Now;
+        TopClockText.Text = now.ToString("ddd, dd MMM  HH:mm", CultureInfo.InvariantCulture);
+        CalendarTodayHeaderText.Text = now.ToString("dddd, dd MMMM yyyy", CultureInfo.InvariantCulture);
+    }
+
+    private void UpdateCpuRamMetrics()
+    {
+        if (NativeMethods.GetSystemTimes(out ulong idle, out ulong kernel, out ulong user))
+        {
+            if (_prevKernelTime != 0 || _prevUserTime != 0)
+            {
+                ulong idleDelta = idle - _prevIdleTime;
+                ulong kernelDelta = kernel - _prevKernelTime;
+                ulong userDelta = user - _prevUserTime;
+                ulong total = kernelDelta + userDelta;
+                if (total > 0)
+                {
+                    int cpuPercent = (int)Math.Clamp(Math.Round(((total - idleDelta) * 100.0) / total), 0, 100);
+                    TopCpuText.Text = $"CPU {cpuPercent}%";
+                }
+            }
+
+            _prevIdleTime = idle;
+            _prevKernelTime = kernel;
+            _prevUserTime = user;
+        }
+
+        var memStatus = new NativeMethods.MEMORYSTATUSEX
+        {
+            dwLength = (uint)Marshal.SizeOf<NativeMethods.MEMORYSTATUSEX>()
+        };
+        if (NativeMethods.GlobalMemoryStatusEx(ref memStatus))
+        {
+            TopRamText.Text = $"RAM {memStatus.dwMemoryLoad}%";
+        }
+    }
+
+    private DynamicIslandState GetDefaultIslandState() =>
+        _isPlayingMedia ? DynamicIslandState.MediaPill : DynamicIslandState.Idle;
+
+    private void TransitionDynamicIsland(DynamicIslandState newState)
+    {
+        bool wasCollapsed = _islandState is DynamicIslandState.Idle or DynamicIslandState.MediaPill;
+        bool isExpanding = newState is DynamicIslandState.NotificationToast or DynamicIslandState.ExpandedHub;
+
+        _islandState = newState;
+        _isCenterHubOpen = newState == DynamicIslandState.ExpandedHub;
+        DynamicIslandShell.Visibility = Visibility.Visible;
+        DynamicIslandShell.Opacity = 1.0;
+
+        IdleIslandView.Visibility = newState == DynamicIslandState.Idle ? Visibility.Visible : Visibility.Collapsed;
+        MediaPillView.Visibility = newState == DynamicIslandState.MediaPill ? Visibility.Visible : Visibility.Collapsed;
+        ToastView.Visibility = newState == DynamicIslandState.NotificationToast ? Visibility.Visible : Visibility.Collapsed;
+        ExpandedHubView.Visibility = newState == DynamicIslandState.ExpandedHub ? Visibility.Visible : Visibility.Collapsed;
+
+        if (newState == DynamicIslandState.MediaPill)
+        {
+            _visualizerStoryboard?.Begin(this, true);
+        }
+        else
+        {
+            _visualizerStoryboard?.Stop(this);
+        }
+
+        double targetWidth = newState switch
+        {
+            DynamicIslandState.ExpandedHub => 530,
+            DynamicIslandState.NotificationToast => _activeToastIsAlarm ? 388 : 336,
+            DynamicIslandState.MediaPill => 292,
+            _ => 140
+        };
+        double targetHeight = newState switch
+        {
+            DynamicIslandState.ExpandedHub => _showingAlertsTab ? 252 : 148,
+            DynamicIslandState.NotificationToast => 64,
+            DynamicIslandState.MediaPill => 26,
+            _ => 30
+        };
+        Thickness targetMargin = newState == DynamicIslandState.MediaPill
+            ? new Thickness(0, 2, 0, 0)
+            : new Thickness(0);
+
+        DynamicIslandShell.CornerRadius = isExpanding
+            ? new CornerRadius(0, 0, newState == DynamicIslandState.ExpandedHub ? 24 : 20, newState == DynamicIslandState.ExpandedHub ? 24 : 20)
+            : (newState == DynamicIslandState.MediaPill
+                ? new CornerRadius(13)
+                : new CornerRadius(15));
+
+        LeftTopEarFlare.Visibility = isExpanding ? Visibility.Visible : Visibility.Collapsed;
+        RightTopEarFlare.Visibility = isExpanding ? Visibility.Visible : Visibility.Collapsed;
+
+        DynamicIslandShell.BorderBrush = Brushes.Transparent;
+        DynamicIslandShell.BorderThickness = new Thickness(0);
+        if (newState == DynamicIslandState.Idle)
+        {
+            DynamicIslandShell.Background = Brushes.Transparent;
+            DynamicIslandShell.Effect = null;
+        }
+        else
+        {
+            DynamicIslandShell.Background = (Brush)FindResource("NotchBackgroundBrush");
+            DynamicIslandShell.Effect = isExpanding ? TryFindResource("NotchShadowEffect") as Effect : null;
+        }
+
+        var morphDuration = TimeSpan.FromMilliseconds(isExpanding || !wasCollapsed ? 300 : 240);
+        var morphEasing = new ExponentialEase { EasingMode = EasingMode.EaseOut, Exponent = 4.2 };
+
+        DynamicIslandShell.BeginAnimation(WidthProperty, new DoubleAnimation(targetWidth, morphDuration) { EasingFunction = morphEasing });
+        DynamicIslandShell.BeginAnimation(HeightProperty, new DoubleAnimation(targetHeight, morphDuration) { EasingFunction = morphEasing });
+        DynamicIslandShell.BeginAnimation(MarginProperty, new ThicknessAnimation(targetMargin, morphDuration) { EasingFunction = morphEasing });
+
+        var contentEase = new QuadraticEase { EasingMode = EasingMode.EaseOut };
+        if (isExpanding)
+        {
+            IslandContentContainer.BeginAnimation(OpacityProperty, new DoubleAnimation(0.45, 1.0, TimeSpan.FromMilliseconds(220)) { EasingFunction = contentEase });
+            IslandContentScale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(0.95, 1.0, TimeSpan.FromMilliseconds(280)) { EasingFunction = morphEasing });
+            IslandContentScale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(0.88, 1.0, TimeSpan.FromMilliseconds(280)) { EasingFunction = morphEasing });
+        }
+        else
+        {
+            IslandContentContainer.BeginAnimation(OpacityProperty, new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(160)) { EasingFunction = contentEase });
+            IslandContentScale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(200)) { EasingFunction = morphEasing });
+            IslandContentScale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(200)) { EasingFunction = morphEasing });
+        }
+    }
+
+    private void SetCenterHubOpen(bool open, bool showAlerts = false)
+    {
+        if (open)
+        {
+            if (_islandState == DynamicIslandState.ExpandedHub)
+            {
+                SetExpandedTab(showAlerts);
+                return;
+            }
+            SetVolumePopupOpen(false);
+            SetBrightnessPopupOpen(false);
+            SetClockPopupOpen(false);
+            _toastAutoCollapseTimer.Stop();
+            SetExpandedTab(showAlerts, animateResize: false);
+            _notificationService.MarkAllRead();
+            TransitionDynamicIsland(DynamicIslandState.ExpandedHub);
+        }
+        else
+        {
+            if (_islandState == DynamicIslandState.ExpandedHub)
+            {
+                TransitionDynamicIsland(GetDefaultIslandState());
+            }
+        }
+    }
+
+    private void SetVolumePopupOpen(bool open)
+    {
+        if (_isVolumePopupOpen == open) return;
+        _isVolumePopupOpen = open;
+
+        if (open)
+        {
+            SetCenterHubOpen(false);
+            SetBrightnessPopupOpen(false);
+            SetClockPopupOpen(false);
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd != IntPtr.Zero)
+            {
+                NativeMethods.SetForegroundWindow(hwnd);
+            }
+            Activate();
+
+            VolumePopupShell.Visibility = Visibility.Visible;
+            VolumePopupShell.BeginAnimation(OpacityProperty, new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(160))
+            {
+                EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
+            });
+            VolumePopupSlideTransform.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(-8.0, 0.0, TimeSpan.FromMilliseconds(200))
+            {
+                EasingFunction = new ExponentialEase { EasingMode = EasingMode.EaseOut, Exponent = 4 }
+            });
+        }
+        else
+        {
+            var fadeOut = new DoubleAnimation(0.0, TimeSpan.FromMilliseconds(140));
+            fadeOut.Completed += (_, _) =>
+            {
+                if (!_isVolumePopupOpen)
+                {
+                    VolumePopupShell.Visibility = Visibility.Collapsed;
+                }
+            };
+            VolumePopupShell.BeginAnimation(OpacityProperty, fadeOut);
+        }
+    }
+
+    private void SetBrightnessPopupOpen(bool open)
+    {
+        if (_isBrightnessPopupOpen == open) return;
+        _isBrightnessPopupOpen = open;
+
+        if (open)
+        {
+            SetCenterHubOpen(false);
+            SetVolumePopupOpen(false);
+            SetClockPopupOpen(false);
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd != IntPtr.Zero)
+            {
+                NativeMethods.SetForegroundWindow(hwnd);
+            }
+            Activate();
+
+            BrightnessPopupShell.Visibility = Visibility.Visible;
+            BrightnessPopupShell.BeginAnimation(OpacityProperty, new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(160))
+            {
+                EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
+            });
+            BrightnessPopupSlideTransform.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(-8.0, 0.0, TimeSpan.FromMilliseconds(200))
+            {
+                EasingFunction = new ExponentialEase { EasingMode = EasingMode.EaseOut, Exponent = 4 }
+            });
+        }
+        else
+        {
+            var fadeOut = new DoubleAnimation(0.0, TimeSpan.FromMilliseconds(140));
+            fadeOut.Completed += (_, _) =>
+            {
+                if (!_isBrightnessPopupOpen)
+                {
+                    BrightnessPopupShell.Visibility = Visibility.Collapsed;
+                }
+            };
+            BrightnessPopupShell.BeginAnimation(OpacityProperty, fadeOut);
+        }
+    }
+
+    private void SetClockPopupOpen(bool open)
+    {
+        if (_isClockPopupOpen == open) return;
+        _isClockPopupOpen = open;
+
+        if (open)
+        {
+            SetCenterHubOpen(false);
+            SetVolumePopupOpen(false);
+            SetBrightnessPopupOpen(false);
+            _displayedCalendarMonth = new DateTime(DateTime.Now.Year, DateTime.Now.Month, 1);
+            RenderMonthCalendar(_displayedCalendarMonth);
+            _notificationService.MarkAllRead();
+
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd != IntPtr.Zero)
+            {
+                NativeMethods.SetForegroundWindow(hwnd);
+            }
+            Activate();
+
+            ClockCalendarPopupShell.Visibility = Visibility.Visible;
+            ClockCalendarPopupShell.BeginAnimation(OpacityProperty, new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(180))
+            {
+                EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
+            });
+            ClockPopupSlideTransform.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(-8.0, 0.0, TimeSpan.FromMilliseconds(220))
+            {
+                EasingFunction = new ExponentialEase { EasingMode = EasingMode.EaseOut, Exponent = 4 }
+            });
+        }
+        else
+        {
+            var fadeOut = new DoubleAnimation(0.0, TimeSpan.FromMilliseconds(150));
+            fadeOut.Completed += (_, _) =>
+            {
+                if (!_isClockPopupOpen)
+                {
+                    ClockCalendarPopupShell.Visibility = Visibility.Collapsed;
+                }
+            };
+            ClockCalendarPopupShell.BeginAnimation(OpacityProperty, fadeOut);
+        }
+    }
+
+    private void RenderMonthCalendar(DateTime monthStart)
+    {
+        CalendarMonthYearText.Text = monthStart.ToString("MMMM yyyy", CultureInfo.InvariantCulture);
+        MonthCalendarGrid.Children.Clear();
+
+        DateTime today = DateTime.Today;
+        int firstDow = ((int)monthStart.DayOfWeek + 6) % 7; // Monday = 0 .. Sunday = 6
+        DateTime gridStart = monthStart.AddDays(-firstDow);
+
+        for (int i = 0; i < 42; i++)
+        {
+            DateTime cellDate = gridStart.AddDays(i);
+            bool isCurrentMonth = cellDate.Month == monthStart.Month && cellDate.Year == monthStart.Year;
+            bool isToday = cellDate.Date == today;
+
+            var cellBorder = new Border
+            {
+                Width = 26,
+                Height = 24,
+                CornerRadius = new CornerRadius(12),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Background = isToday
+                    ? (Brush)FindResource("AccentBrush")
+                    : Brushes.Transparent
+            };
+
+            var dayText = new TextBlock
+            {
+                Text = cellDate.Day.ToString(CultureInfo.InvariantCulture),
+                FontFamily = (FontFamily)FindResource("AppFontFamily"),
+                FontSize = 11.5,
+                FontWeight = isToday ? FontWeights.Bold : FontWeights.Medium,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Foreground = isToday
+                    ? Brushes.White
+                    : (isCurrentMonth
+                        ? (Brush)FindResource("PrimaryTextBrush")
+                        : new SolidColorBrush(Color.FromArgb(0x55, 0xFF, 0xFF, 0xFF)))
+            };
+
+            cellBorder.Child = dayText;
+            MonthCalendarGrid.Children.Add(cellBorder);
+        }
+    }
+
+    private void CalendarPrevMonth_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        _displayedCalendarMonth = _displayedCalendarMonth.AddMonths(-1);
+        RenderMonthCalendar(_displayedCalendarMonth);
+    }
+
+    private void CalendarNextMonth_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        _displayedCalendarMonth = _displayedCalendarMonth.AddMonths(1);
+        RenderMonthCalendar(_displayedCalendarMonth);
+    }
+
+    private void CalendarTodayHeader_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        _displayedCalendarMonth = new DateTime(DateTime.Now.Year, DateTime.Now.Month, 1);
+        RenderMonthCalendar(_displayedCalendarMonth);
+    }
+
+    private void CloseTransientPopups()
+    {
+        if (_activeContextMenu is { IsOpen: true } menu)
+        {
+            menu.IsOpen = false;
+        }
+        _activeContextMenu = null;
+
+        if (_isCenterHubOpen)
+        {
+            SetCenterHubOpen(false);
+        }
+
+        if (_isVolumePopupOpen)
+        {
+            SetVolumePopupOpen(false);
+        }
+
+        if (_isBrightnessPopupOpen)
+        {
+            SetBrightnessPopupOpen(false);
+        }
+
+        if (_isClockPopupOpen)
+        {
+            SetClockPopupOpen(false);
+        }
+    }
+
+    private void OnFullscreenChanged(bool isFullscreen)
+    {
+        _isFullscreenHidden = isFullscreen;
+        if (_isFullscreenHidden)
+        {
+            CloseTransientPopups();
+            Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            Visibility = Visibility.Visible;
+        }
+    }
+
+    private void ApplyMediaSnapshot(MediaSnapshot snapshot)
+    {
+        _isPlayingMedia = snapshot.IsPlaying;
+
+        PillAlbumArt.Source = snapshot.Thumbnail;
+        PillTrackTitle.Text = snapshot.Title;
+        PillPlayPausePath.Data = (Geometry)FindResource(snapshot.IsPlaying ? "IconPause" : "IconPlay");
+
+        ExpandedAlbumArt.Source = snapshot.Thumbnail;
+        ExpandedTrackTitle.Text = snapshot.Title;
+        ExpandedTrackArtist.Text = snapshot.Artist;
+        PlayPauseIconPath.Data = (Geometry)FindResource(snapshot.IsPlaying ? "IconPause" : "IconPlay");
+
+        if (_islandState != DynamicIslandState.NotificationToast &&
+            _islandState != DynamicIslandState.ExpandedHub)
+        {
+            TransitionDynamicIsland(GetDefaultIslandState());
+        }
+    }
+
+    private void ApplySystemStatus(SystemStatusSnapshot status)
+    {
+        _isUpdatingVolumeSlider = true;
+        PopupVolumeSlider.Value = status.VolumePercent;
+        _isUpdatingVolumeSlider = false;
+
+        string volLabel = status.IsMuted ? "Muted" : $"{status.VolumePercent}%";
+        PopupVolumePercentText.Text = volLabel;
+        TopVolumeText.Text = volLabel;
+
+        var speakerGeom = (Geometry)FindResource(status.IsMuted || status.VolumePercent == 0 ? "IconSpeakerMuted" : "IconSpeaker");
+        PopupMuteIconPath.Data = speakerGeom;
+        TopVolumeIcon.Data = speakerGeom;
+
+        _isUpdatingBrightnessSlider = true;
+        PopupBrightnessSlider.Value = status.BrightnessPercent;
+        _isUpdatingBrightnessSlider = false;
+
+        string brightLabel = $"{status.BrightnessPercent}%";
+        PopupBrightnessPercentText.Text = brightLabel;
+        TopBrightnessButton.ToolTip = $"Brightness: {brightLabel} (Click: Slider | Scroll: Adjust | Right-Click: Display Settings)";
+
+        if (status.HasBattery)
+        {
+            double fillW = Math.Clamp(status.BatteryPercent / 100.0 * 11.4, 1.5, 11.4);
+            TopBatteryFillBar.Width = fillW;
+            TopBatteryText.Text = $"{status.BatteryPercent}%";
+
+            if (status.IsCharging)
+            {
+                TopBatteryFillBar.Background = new SolidColorBrush(Color.FromRgb(0x22, 0xC5, 0x5E));
+                TopBatteryBoltIcon.Visibility = Visibility.Visible;
+                TopBatteryButton.ToolTip = $"Battery: {status.BatteryPercent}% (Charging — Click: Power Settings)";
+            }
+            else if (status.BatteryPercent <= 20)
+            {
+                TopBatteryFillBar.Background = new SolidColorBrush(Color.FromRgb(0xEF, 0x44, 0x44));
+                TopBatteryBoltIcon.Visibility = Visibility.Collapsed;
+                TopBatteryButton.ToolTip = $"Battery: {status.BatteryPercent}% (Low — Click: Power Settings)";
+            }
+            else
+            {
+                TopBatteryFillBar.Background = Brushes.White;
+                TopBatteryBoltIcon.Visibility = Visibility.Collapsed;
+                TopBatteryButton.ToolTip = $"Battery: {status.BatteryPercent}% (Click: Power Settings)";
+            }
+        }
+        else
+        {
+            TopBatteryFillBar.Width = 11.4;
+            TopBatteryFillBar.Background = new SolidColorBrush(Color.FromRgb(0x22, 0xC5, 0x5E));
+            TopBatteryBoltIcon.Visibility = Visibility.Visible;
+            TopBatteryText.Text = "AC";
+            TopBatteryButton.ToolTip = "AC Power (Click: Power Settings)";
+        }
+
+        Brush wifiBrush = status.IsNetworkConnected
+            ? (Brush)FindResource("PrimaryTextBrush")
+            : (Brush)FindResource("WarningBrush");
+        TopWifiIcon.Stroke = wifiBrush;
+        TopWifiButton.ToolTip = status.IsNetworkConnected
+            ? $"Wi-Fi: {status.NetworkLabel} (Click: Flyout | Right-Click: Network Settings)"
+            : "Wi-Fi: Offline (Click: Flyout | Right-Click: Network Settings)";
+    }
+
+    private void OnNotificationReceived(NotificationItem item)
+    {
+        RefreshNotificationDrawer();
+
+        _activeToastNotificationId = item.Id;
+        _activeToastIsAlarm = item.IsAlarm;
+        _lastToastItem = item;
+
+        ToastAppIcon.Source = item.AppIcon;
+        ToastFallbackIcon.Visibility = item.AppIcon == null ? Visibility.Visible : Visibility.Collapsed;
+        ToastAppName.Text = item.AppName;
+        ToastTimeText.Text = item.TimeText;
+        ToastTitleText.Text = item.Title;
+        ToastBodyText.Text = item.Body;
+        ToastAlarmActionButton.Visibility = item.IsAlarm ? Visibility.Visible : Visibility.Collapsed;
+
+        SetCenterHubOpen(false);
+        SetVolumePopupOpen(false);
+        SetBrightnessPopupOpen(false);
+        SetClockPopupOpen(false);
+        TransitionDynamicIsland(DynamicIslandState.NotificationToast);
+
+        _toastAutoCollapseTimer.Stop();
+        _toastAutoCollapseTimer.Interval = TimeSpan.FromMilliseconds(item.IsAlarm ? 15000 : 4500);
+        if (!DynamicIslandShell.IsMouseOver)
+        {
+            _toastAutoCollapseTimer.Start();
+        }
+    }
+
+    private void RefreshNotificationDrawer()
+    {
+        var recentTray = _notificationService.GetRecentNotifications(8);
+        var recentClock = _notificationService.GetRecentNotifications(15);
+        NotificationHistoryList.ItemsSource = recentTray;
+        ClockNotificationList.ItemsSource = recentClock;
+
+        if (recentTray.Count == 0)
+        {
+            string emptyMsg = _notificationService.IsListenerActive
+                ? "No recent notifications."
+                : _notificationService.StatusMessage;
+            NotificationEmptyText.Text = emptyMsg;
+            NotificationEmptyText.Visibility = Visibility.Visible;
+            ClockNotificationEmptyText.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            NotificationEmptyText.Visibility = Visibility.Collapsed;
+            ClockNotificationEmptyText.Visibility = Visibility.Collapsed;
+        }
+
+        int count = _notificationService.HistoryCount;
+        AlertsTabLabel.Text = count > 0 ? $"Tray ({count})" : "Tray";
+        ClockNotifCountBadge.Text = count.ToString(CultureInfo.InvariantCulture);
+
+        bool dnd = _notificationService.IsDoNotDisturb;
+        QuickDndText.Text = dnd ? "Focus On" : "Focus";
+        QuickDndIcon.Fill = (Brush)FindResource(dnd ? "AccentBrush" : "PrimaryTextBrush");
+        QuickDndButton.Background = new SolidColorBrush(dnd
+            ? Color.FromArgb(0x36, 0x3B, 0x82, 0xF6)
+            : Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF));
+    }
+
+    private void TopBarBorder_RightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement fe) return;
+        ShowGlassContextMenu(fe, new[]
+        {
+            ("Restore Default Windows & Exit", (Action)(() =>
+            {
+                _taskbarGuard.ShowSystemTaskbar();
+                Application.Current.Shutdown();
+            })),
+            ("Toggle Windows Taskbar (Ctrl+Alt+Shift+R)", (Action)(() => _taskbarGuard.ToggleSystemTaskbar())),
+            ("Open Control Hub", (Action)(() => SetCenterHubOpen(true))),
+            ("Task Manager", (Action)(() => LaunchShellUri("taskmgr.exe"))),
+            ("Windows Settings", (Action)(() => LaunchShellUri("ms-settings:")))
+        });
+        e.Handled = true;
+    }
+
+    // --- Left Top Bar Shortcuts & Windows Start ---
+    private static void SendEscapeKey()
+    {
+        NativeMethods.keybd_event(NativeMethods.VK_ESCAPE, 0, 0, UIntPtr.Zero);
+        NativeMethods.keybd_event(NativeMethods.VK_ESCAPE, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
+    }
+
+    private void WindowsStart_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        IntPtr fg = NativeMethods.GetForegroundWindow();
+        _suppressNextStartClick = WindowTracker.IsStartMenuWindow(fg) || _isStartMenuOpen;
+    }
+
+    private void WindowsStart_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        CloseTransientPopups();
+
+        if (_suppressNextStartClick || _isStartMenuOpen ||
+            (Environment.TickCount64 - _lastStartDismissByButtonTick < 450))
+        {
+            _suppressNextStartClick = false;
+            _isStartMenuOpen = false;
+            _lastStartDismissByButtonTick = 0;
+            SendEscapeKey();
+            return;
+        }
+
+        _isStartMenuOpen = true;
+        _startOpenedTick = Environment.TickCount64;
+        NativeMethods.keybd_event(NativeMethods.VK_LWIN, 0, 0, UIntPtr.Zero);
+        NativeMethods.keybd_event(NativeMethods.VK_LWIN, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
+    }
+
+    private void WindowsStart_RightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement fe) return;
+        ShowGlassContextMenu(fe, new[]
+        {
+            ("Settings", (Action)(() => LaunchShellUri("ms-settings:"))),
+            ("Task Manager", (Action)(() => LaunchShellUri("taskmgr.exe"))),
+            ("Toggle Windows Taskbar (Ctrl+Alt+Shift+R)", (Action)(() => _taskbarGuard.ToggleSystemTaskbar())),
+            ("Exit WinMacShell", (Action)(() => Application.Current.Shutdown()))
+        });
+        e.Handled = true;
+    }
+
+    private void ShortcutExplorer_Click(object sender, RoutedEventArgs e) => LaunchShellUri("explorer.exe");
+    private void ShortcutSettings_Click(object sender, RoutedEventArgs e) => LaunchShellUri("ms-settings:");
+    private void ShortcutTaskManager_Click(object sender, RoutedEventArgs e) => LaunchShellUri("taskmgr.exe");
+    private void ShortcutTerminal_Click(object sender, RoutedEventArgs e) => LaunchShellUri("wt.exe");
+
+    // --- Interactive Wi-Fi, Brightness, Volume, Battery, & Hub Toggle ---
+    private void TopWifi_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        IntPtr fg = NativeMethods.GetForegroundWindow();
+        _suppressNextWifiClick = WindowTracker.IsQuickSettingsWindow(fg) || _isWifiFlyoutOpen;
+    }
+
+    private void TopWifi_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        CloseTransientPopups();
+
+        if (_suppressNextWifiClick || _isWifiFlyoutOpen ||
+            (Environment.TickCount64 - _lastWifiDismissByButtonTick < 450))
+        {
+            _suppressNextWifiClick = false;
+            _isWifiFlyoutOpen = false;
+            _lastWifiDismissByButtonTick = 0;
+            SendEscapeKey();
+            return;
+        }
+
+        _isWifiFlyoutOpen = true;
+        _wifiOpenedTick = Environment.TickCount64;
+        LaunchShellUri("ms-availablenetworks:");
+    }
+
+    private void TopBrightness_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        SetBrightnessPopupOpen(!_isBrightnessPopupOpen);
+    }
+
+    private void TopBrightness_RightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement fe) return;
+        ShowGlassContextMenu(fe, new[]
+        {
+            ("Display Settings", (Action)(() => LaunchShellUri("ms-settings:display"))),
+            ("Night Light Settings", (Action)(() => LaunchShellUri("ms-settings:nightlight"))),
+            ("Power & Battery", (Action)(() => LaunchShellUri("ms-settings:powersleep")))
+        });
+        e.Handled = true;
+    }
+
+    private void TopBrightness_MouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        double current = _systemStatusService.CurrentStatus.BrightnessPercent;
+        double next = Math.Clamp(current + (e.Delta > 0 ? 5 : -5), 5, 100);
+        _systemStatusService.SetDisplayBrightness(next);
+        e.Handled = true;
+    }
+
+    private void BrightnessSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_isUpdatingBrightnessSlider || !IsLoaded) return;
+        _systemStatusService.SetDisplayBrightness(e.NewValue);
+    }
+
+    private void QuickBluetooth_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        CloseTransientPopups();
+        LaunchShellUri("ms-settings:bluetooth");
+    }
+
+    private void QuickDnd_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        _notificationService.ToggleDoNotDisturb();
+    }
+
+    private void QuickDnd_RightClick(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        CloseTransientPopups();
+        LaunchShellUri("ms-settings:quiethours");
+    }
+
+    private void QuickProject_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        CloseTransientPopups();
+        LaunchShellUri("DisplaySwitch.exe");
+    }
+
+    private void QuickProject_RightClick(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        CloseTransientPopups();
+        LaunchShellUri("ms-settings:display");
+    }
+
+    private void QuickNightLight_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        CloseTransientPopups();
+        LaunchShellUri("ms-settings:nightlight");
+    }
+
+    private void QuickSnip_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        CloseTransientPopups();
+        LaunchShellUri("ms-screenclip:");
+    }
+
+    private void QuickWinA_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        CloseTransientPopups();
+        NativeMethods.keybd_event(NativeMethods.VK_LWIN, 0, 0, UIntPtr.Zero);
+        NativeMethods.keybd_event(NativeMethods.VK_A, 0, 0, UIntPtr.Zero);
+        NativeMethods.keybd_event(NativeMethods.VK_A, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
+        NativeMethods.keybd_event(NativeMethods.VK_LWIN, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
+    }
+
+    private void TopWifi_RightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement fe) return;
+        ShowGlassContextMenu(fe, new[]
+        {
+            ("Open Wi-Fi Flyout", (Action)(() => LaunchShellUri("ms-availablenetworks:"))),
+            ("Wi-Fi Settings", (Action)(() => LaunchShellUri("ms-settings:network-wifi"))),
+            ("Network & Internet", (Action)(() => LaunchShellUri("ms-settings:network"))),
+            ("Network Adapters", (Action)(() => LaunchShellUri("ncpa.cpl")))
+        });
+        e.Handled = true;
+    }
+
+    private void TopVolume_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        SetVolumePopupOpen(!_isVolumePopupOpen);
+    }
+
+    private void TopVolume_RightClick(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        _systemStatusService.ToggleMute();
+    }
+
+    private void TopVolume_MouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        double current = _systemStatusService.CurrentStatus.VolumePercent;
+        double next = Math.Clamp(current + (e.Delta > 0 ? 4 : -4), 0, 100);
+        _systemStatusService.SetMasterVolume(next);
+        e.Handled = true;
+    }
+
+    private void TopBattery_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        CloseTransientPopups();
+        LaunchShellUri("ms-settings:powersleep");
+    }
+
+    private void TopBattery_RightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement fe) return;
+        ShowGlassContextMenu(fe, new[]
+        {
+            ("Power & Battery Settings", (Action)(() => LaunchShellUri("ms-settings:powersleep"))),
+            ("Battery Usage Details", (Action)(() => LaunchShellUri("ms-settings:batterysaver-usagedetails"))),
+            ("Power Options (Control Panel)", (Action)(() => LaunchShellUri("powercfg.cpl")))
+        });
+        e.Handled = true;
+    }
+
+    private void ToggleHub_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        _hubHoverOpenTimer.Stop();
+        _hubHoverCloseTimer.Stop();
+        SetClockPopupOpen(!_isClockPopupOpen);
+    }
+
+    private void ShowGlassContextMenu(FrameworkElement target, IEnumerable<(string Header, Action Action)> items)
+    {
+        CloseTransientPopups();
+
+        IntPtr hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd != IntPtr.Zero)
+        {
+            NativeMethods.SetForegroundWindow(hwnd);
+        }
+        Activate();
+
+        var menu = new ContextMenu
+        {
+            Style = (Style)FindResource("GlassContextMenuStyle"),
+            StaysOpen = false
+        };
+        var itemStyle = (Style)FindResource("GlassMenuItemStyle");
+
+        foreach (var (header, action) in items)
+        {
+            var mi = new MenuItem { Header = header, Style = itemStyle };
+            mi.Click += (_, _) => action();
+            menu.Items.Add(mi);
+        }
+
+        menu.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_activeContextMenu, menu))
+            {
+                _activeContextMenu = null;
+            }
+        };
+
+        _activeContextMenu = menu;
+        menu.PlacementTarget = target;
+        menu.IsOpen = true;
+    }
+
+    private static void LaunchShellUri(string target)
+    {
+        try
+        {
+            using var _ = Process.Start(new ProcessStartInfo
+            {
+                FileName = target,
+                UseShellExecute = true
+            });
+        }
+        catch
+        {
+            // Fallback for URI schemes via explorer
+            try
+            {
+                using var _ = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = target,
+                    UseShellExecute = true
+                });
+            }
+            catch { }
+        }
+    }
+
+    // --- Unified Morphing Dynamic Island Interactions ---
+    private void DynamicIsland_MouseEnter(object sender, MouseEventArgs e)
+    {
+        _hubHoverCloseTimer.Stop();
+        if (_islandState == DynamicIslandState.NotificationToast)
+        {
+            _toastAutoCollapseTimer.Stop();
+            return;
+        }
+
+        if (_islandState != DynamicIslandState.ExpandedHub)
+        {
+            _hubHoverOpenTimer.Start();
+        }
+    }
+
+    private void DynamicIsland_MouseLeave(object sender, MouseEventArgs e)
+    {
+        _hubHoverOpenTimer.Stop();
+        if (_islandState == DynamicIslandState.NotificationToast)
+        {
+            _toastAutoCollapseTimer.Start();
+            return;
+        }
+
+        if (_islandState == DynamicIslandState.ExpandedHub)
+        {
+            _hubHoverCloseTimer.Start();
+        }
+    }
+
+    private void DynamicIsland_Click(object sender, MouseButtonEventArgs e)
+    {
+        _hubHoverOpenTimer.Stop();
+        _hubHoverCloseTimer.Stop();
+
+        if (_islandState == DynamicIslandState.NotificationToast)
+        {
+            _toastAutoCollapseTimer.Stop();
+            if (_lastToastItem != null)
+            {
+                ActivateNotificationApp(_lastToastItem);
+            }
+            else
+            {
+                SetCenterHubOpen(true, showAlerts: true);
+            }
+            return;
+        }
+
+        if (_islandState != DynamicIslandState.ExpandedHub)
+        {
+            SetCenterHubOpen(true, showAlerts: false);
+        }
+    }
+
+    private void OpenClockSettings_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        CloseTransientPopups();
+        LaunchShellUri("ms-clock:");
+    }
+
+    private void NotificationItem_Click(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        if (sender is FrameworkElement { Tag: NotificationItem item })
+        {
+            ActivateNotificationApp(item);
+        }
+    }
+
+    private void ActivateNotificationApp(NotificationItem item)
+    {
+        _toastAutoCollapseTimer.Stop();
+        CloseTransientPopups();
+        if (_islandState == DynamicIslandState.NotificationToast)
+        {
+            ToastAlarmActionButton.Visibility = Visibility.Collapsed;
+            TransitionDynamicIsland(GetDefaultIslandState());
+        }
+
+        string appId = item.AppId ?? string.Empty;
+        string appName = item.AppName ?? string.Empty;
+
+        // 1. Fast path for Windows Clock / Alarms
+        if (item.IsAlarm ||
+            appName.Equals("Clock", StringComparison.OrdinalIgnoreCase) ||
+            appName.Equals("WindowsAlarms", StringComparison.OrdinalIgnoreCase) ||
+            appId.Contains("WindowsAlarms", StringComparison.OrdinalIgnoreCase))
+        {
+            ApplicationWindow? clockWin = FindMatchingWindow(appId, "Clock");
+            if (clockWin != null)
+            {
+                BringWindowToFront(clockWin.Handle);
+                return;
+            }
+            LaunchShellUri("ms-clock:");
+            return;
+        }
+
+        // 2. Match against live taskbar/shell windows (handles Win32 & UWP ApplicationFrameHost windows)
+        ApplicationWindow? match = FindMatchingWindow(appId, appName);
+        if (match != null)
+        {
+            BringWindowToFront(match.Handle);
+            return;
+        }
+
+        // 3. Fallback scan of running processes with a main window handle
+        if (!string.IsNullOrWhiteSpace(appName) && appName.Length >= 3)
+        {
+            foreach (Process proc in Process.GetProcesses())
+            {
+                try
+                {
+                    if (proc.MainWindowHandle == IntPtr.Zero) continue;
+                    if (proc.ProcessName.Contains(appName, StringComparison.OrdinalIgnoreCase) ||
+                        appName.Contains(proc.ProcessName, StringComparison.OrdinalIgnoreCase) ||
+                        (!string.IsNullOrWhiteSpace(proc.MainWindowTitle) &&
+                         proc.MainWindowTitle.Contains(appName, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        BringWindowToFront(proc.MainWindowHandle);
+                        return;
+                    }
+                }
+                catch { }
+                finally
+                {
+                    proc.Dispose();
+                }
+            }
+        }
+
+        // 4. Launch app cleanly if no existing window is open (e.g. minimized to tray or background notification)
+        if (!string.IsNullOrWhiteSpace(appId))
+        {
+            if (appId.Contains('!'))
+            {
+                LaunchShellUri($"shell:AppsFolder\\{appId}");
+                return;
+            }
+            if (appId.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && File.Exists(appId))
+            {
+                LaunchShellUri(appId);
+                return;
+            }
+        }
+
+        if (appName.Contains("WhatsApp", StringComparison.OrdinalIgnoreCase))
+        {
+            LaunchShellUri("whatsapp:");
+        }
+        else if (appName.Contains("Telegram", StringComparison.OrdinalIgnoreCase))
+        {
+            LaunchShellUri("tg:");
+        }
+        else if (appName.Contains("Discord", StringComparison.OrdinalIgnoreCase))
+        {
+            LaunchShellUri("discord:");
+        }
+    }
+
+    private ApplicationWindow? FindMatchingWindow(string appId, string appName)
+    {
+        var windows = _shellService.Tasks.GroupedWindows.OfType<ApplicationWindow>().ToList();
+        string packagePrefix = string.Empty;
+        if (!string.IsNullOrWhiteSpace(appId))
+        {
+            int bang = appId.IndexOf('!');
+            string rawPkg = bang > 0 ? appId[..bang] : appId;
+            int under = rawPkg.IndexOf('_');
+            packagePrefix = under > 0 ? rawPkg[..under] : rawPkg;
+        }
+
+        foreach (ApplicationWindow win in windows)
+        {
+            string winAumid = win.AppUserModelID ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(appId) && !string.IsNullOrWhiteSpace(winAumid))
+            {
+                if (winAumid.Equals(appId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return win;
+                }
+                if (packagePrefix.Length >= 5 && winAumid.Contains(packagePrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return win;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(appName) && appName.Length >= 3)
+            {
+                string exeName = string.IsNullOrWhiteSpace(win.WinFileName)
+                    ? string.Empty
+                    : Path.GetFileNameWithoutExtension(win.WinFileName);
+
+                if ((!string.IsNullOrWhiteSpace(exeName) &&
+                     (exeName.Contains(appName, StringComparison.OrdinalIgnoreCase) ||
+                      appName.Contains(exeName, StringComparison.OrdinalIgnoreCase))) ||
+                    (!string.IsNullOrWhiteSpace(win.WinFileDescription) &&
+                     win.WinFileDescription.Contains(appName, StringComparison.OrdinalIgnoreCase)) ||
+                    (!string.IsNullOrWhiteSpace(win.Title) &&
+                     win.Title.Contains(appName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    return win;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static void BringWindowToFront(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return;
+        if (NativeMethods.IsIconic(hwnd))
+        {
+            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
+        }
+        NativeMethods.SetForegroundWindow(hwnd);
+    }
+
+    private void StopAlarmToast_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        _toastAutoCollapseTimer.Stop();
+        _notificationService.DismissNotification(_activeToastNotificationId);
+        ToastAlarmActionButton.Visibility = Visibility.Collapsed;
+        TransitionDynamicIsland(GetDefaultIslandState());
+    }
+
+    private void OpenClockApp_RightClick(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        _toastAutoCollapseTimer.Stop();
+        TransitionDynamicIsland(GetDefaultIslandState());
+        LaunchShellUri("ms-clock:");
+    }
+
+    private void DismissToast_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        _toastAutoCollapseTimer.Stop();
+        ToastAlarmActionButton.Visibility = Visibility.Collapsed;
+        TransitionDynamicIsland(GetDefaultIslandState());
+    }
+
+    // --- Media & Volume Inside Hub ---
+    private async void PrevMedia_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        await _mediaService.SkipPreviousAsync();
+    }
+
+    private async void PlayPauseMedia_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        await _mediaService.PlayPauseAsync();
+    }
+
+    private async void NextMedia_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        await _mediaService.SkipNextAsync();
+    }
+
+    private void MuteButton_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        _systemStatusService.ToggleMute();
+    }
+
+    private void VolumeSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_isUpdatingVolumeSlider || !IsLoaded) return;
+        _systemStatusService.SetMasterVolume(e.NewValue);
+    }
+
+    private void HubTabButton_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        SetExpandedTab(showAlerts: false);
+    }
+
+    private void AlertsTabButton_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        SetExpandedTab(showAlerts: true);
+    }
+
+    private void SetExpandedTab(bool showAlerts, bool animateResize = true)
+    {
+        _showingAlertsTab = showAlerts;
+        HubTabButton.IsChecked = !_showingAlertsTab;
+        AlertsTabButton.IsChecked = _showingAlertsTab;
+
+        ControlCenterPanel.Visibility = _showingAlertsTab ? Visibility.Collapsed : Visibility.Visible;
+        NotificationDrawerPanel.Visibility = _showingAlertsTab ? Visibility.Visible : Visibility.Collapsed;
+
+        if (_showingAlertsTab)
+        {
+            _notificationService.MarkAllRead();
+        }
+
+        if (animateResize && _islandState == DynamicIslandState.ExpandedHub)
+        {
+            double targetHeight = _showingAlertsTab ? 252 : 148;
+            var resizeEasing = new ExponentialEase { EasingMode = EasingMode.EaseOut, Exponent = 4.2 };
+            DynamicIslandShell.BeginAnimation(
+                HeightProperty,
+                new DoubleAnimation(targetHeight, TimeSpan.FromMilliseconds(300)) { EasingFunction = resizeEasing });
+        }
+    }
+
+    private void ClearNotifications_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        _notificationService.ClearAll();
+    }
+
+    private void TestNotification_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        SetCenterHubOpen(false);
+        _notificationService.TriggerTestNotification();
+    }
+
+    // --- System Tray Icons Forwarding ---
+    private void TrayScrollLeft_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        TrayScrollViewer.ScrollToHorizontalOffset(Math.Max(0, TrayScrollViewer.HorizontalOffset - 80));
+    }
+
+    private void TrayScrollRight_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        TrayScrollViewer.ScrollToHorizontalOffset(TrayScrollViewer.HorizontalOffset + 80);
+    }
+
+    private void TrayScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        TrayScrollViewer.ScrollToHorizontalOffset(TrayScrollViewer.HorizontalOffset - (e.Delta / 2.0));
+        e.Handled = true;
+    }
+
+    private static uint GetPackedCursorPosition()
+    {
+        NativeMethods.GetCursorPos(out NativeMethods.POINT pt);
+        return unchecked((uint)(((pt.Y & 0xFFFF) << 16) | (pt.X & 0xFFFF)));
+    }
+
+    private void TrayIcon_MouseEnter(object sender, MouseEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: NotifyIcon icon })
+        {
+            icon.IconMouseEnter(GetPackedCursorPosition());
+        }
+    }
+
+    private void TrayIcon_MouseLeave(object sender, MouseEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: NotifyIcon icon })
+        {
+            icon.IconMouseLeave(GetPackedCursorPosition());
+        }
+    }
+
+    private void TrayIcon_MouseDown(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        if (sender is FrameworkElement { Tag: NotifyIcon icon })
+        {
+            icon.IconMouseDown(e.ChangedButton, GetPackedCursorPosition(), System.Windows.Forms.SystemInformation.DoubleClickTime);
+        }
+    }
+
+    private void TrayIcon_MouseUp(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        if (sender is FrameworkElement { Tag: NotifyIcon icon })
+        {
+            icon.IconMouseUp(e.ChangedButton, GetPackedCursorPosition(), System.Windows.Forms.SystemInformation.DoubleClickTime);
+        }
+    }
+}
