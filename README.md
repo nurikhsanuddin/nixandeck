@@ -11,6 +11,24 @@ Built with **.NET 10**, **WPF**, **Win32 P/Invoke**, **DWM hardware acceleration
 
 ---
 
+## 📸 Screenshots
+
+![NixanDeck Desktop Overview](demo/2QltNVyjst.jpg)
+
+| Dynamic Island Control Hub | Notification Tray |
+| :---: | :---: |
+| ![Control Hub](demo/explorer_ejuf4FAJiH.png) | ![Notification Tray](demo/explorer_7uaizuWCTm.png) |
+
+| Calendar & Notification Center | System Tray Flyout |
+| :---: | :---: |
+| ![Calendar & Notifications](demo/explorer_AGJoppGaYp.png) | ![System Tray](demo/explorer_yrquPAMmBG.png) |
+
+| Volume & Brightness Sliders | Top Bar Shortcuts |
+| :---: | :---: |
+| ![Volume](demo/explorer_ACmBg29UJh.png) ![Brightness](demo/explorer_BuYS80W3FT.png) | ![Top Bar](demo/explorer_umT1zFmxnX.png) |
+
+---
+
 ## ✨ Key Features
 
 ### 1. 🏝️ Morphing Dynamic Island & Control Hub
@@ -90,7 +108,7 @@ Located at the center of the top bar, the **Dynamic Island** morphs smoothly usi
 
 #### 1. Clone & Build (Debug)
 ```powershell
-git clone https://github.com/<your-username>/nixandeck.git
+git clone https://github.com/nurikhsanuddin/nixandeck.git
 cd nixandeck
 
 dotnet build WinMacShell.sln --configuration Debug
