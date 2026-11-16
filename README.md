@@ -13,7 +13,7 @@ Built with **.NET 10**, **WPF**, **Win32 P/Invoke**, **DWM hardware acceleration
 
 ## 📸 Screenshots
 
-![NixanDeck Desktop Overview](demo/2QltNVyjst.jpg)
+![NixanDeck Desktop Overview](demo/2QltNVyjst.png)
 
 | Dynamic Island Control Hub | Notification Tray |
 | :---: | :---: |
