@@ -47,6 +47,15 @@ public partial class NotchWindow : Window
     private bool _isPlayingMedia;
     private bool _isUpdatingVolumeSlider;
     private bool _isUpdatingBrightnessSlider;
+    private bool _isDraggingVolumeSlider;
+    private bool _isDraggingBrightnessSlider;
+    private long _lastVolumeInteractTick;
+    private long _lastBrightnessInteractTick;
+    private double _targetVolumeWheelValue;
+    private double _targetBrightnessWheelValue;
+    private bool _isAnimatingVolumeWheel;
+    private bool _isAnimatingBrightnessWheel;
+    private readonly DispatcherTimer _sliderWheelTimer;
     private bool _isCenterHubOpen;
     private bool _isTrayPopupOpen;
     private bool _isVolumePopupOpen;
@@ -92,6 +101,44 @@ public partial class NotchWindow : Window
         InitializeComponent();
 
         _visualizerStoryboard = TryFindResource("VisualizerStoryboard") as Storyboard;
+
+        _sliderWheelTimer = new DispatcherTimer(DispatcherPriority.Render)
+        {
+            Interval = TimeSpan.FromMilliseconds(16)
+        };
+        _sliderWheelTimer.Tick += SliderWheelTimer_Tick;
+
+        PopupVolumeSlider.AddHandler(
+            System.Windows.Controls.Primitives.Thumb.DragStartedEvent,
+            new System.Windows.Controls.Primitives.DragStartedEventHandler((_, _) =>
+            {
+                _isDraggingVolumeSlider = true;
+                _isAnimatingVolumeWheel = false;
+                _lastVolumeInteractTick = Environment.TickCount64;
+            }));
+        PopupVolumeSlider.AddHandler(
+            System.Windows.Controls.Primitives.Thumb.DragCompletedEvent,
+            new System.Windows.Controls.Primitives.DragCompletedEventHandler((_, _) =>
+            {
+                _isDraggingVolumeSlider = false;
+                _lastVolumeInteractTick = Environment.TickCount64;
+            }));
+
+        PopupBrightnessSlider.AddHandler(
+            System.Windows.Controls.Primitives.Thumb.DragStartedEvent,
+            new System.Windows.Controls.Primitives.DragStartedEventHandler((_, _) =>
+            {
+                _isDraggingBrightnessSlider = true;
+                _isAnimatingBrightnessWheel = false;
+                _lastBrightnessInteractTick = Environment.TickCount64;
+            }));
+        PopupBrightnessSlider.AddHandler(
+            System.Windows.Controls.Primitives.Thumb.DragCompletedEvent,
+            new System.Windows.Controls.Primitives.DragCompletedEventHandler((_, _) =>
+            {
+                _isDraggingBrightnessSlider = false;
+                _lastBrightnessInteractTick = Environment.TickCount64;
+            }));
 
         // Allowed timer #1: 2-second lightweight telemetry & clock tick (CPU/RAM + minute-checked calendar/clock)
         _clockAlignmentTimer = new DispatcherTimer(DispatcherPriority.Background)
@@ -741,25 +788,34 @@ public partial class NotchWindow : Window
 
     private void ApplySystemStatus(SystemStatusSnapshot status)
     {
-        _isUpdatingVolumeSlider = true;
-        PopupVolumeSlider.Value = status.VolumePercent;
-        _isUpdatingVolumeSlider = false;
+        long nowTick = Environment.TickCount64;
+        bool volumeInteracting = _isDraggingVolumeSlider || _isAnimatingVolumeWheel || (nowTick - _lastVolumeInteractTick <= 300);
+        if (!volumeInteracting)
+        {
+            _isUpdatingVolumeSlider = true;
+            PopupVolumeSlider.Value = status.VolumePercent;
+            _isUpdatingVolumeSlider = false;
 
-        string volLabel = status.IsMuted ? "Muted" : $"{status.VolumePercent}%";
-        PopupVolumePercentText.Text = volLabel;
-        TopVolumeText.Text = volLabel;
+            string volLabel = status.IsMuted ? "Muted" : $"{status.VolumePercent}%";
+            PopupVolumePercentText.Text = volLabel;
+            TopVolumeText.Text = volLabel;
 
-        var speakerGeom = (Geometry)FindResource(status.IsMuted || status.VolumePercent == 0 ? "IconSpeakerMuted" : "IconSpeaker");
-        PopupMuteIconPath.Data = speakerGeom;
-        TopVolumeIcon.Data = speakerGeom;
+            var speakerGeom = (Geometry)FindResource(status.IsMuted || status.VolumePercent == 0 ? "IconSpeakerMuted" : "IconSpeaker");
+            PopupMuteIconPath.Data = speakerGeom;
+            TopVolumeIcon.Data = speakerGeom;
+        }
 
-        _isUpdatingBrightnessSlider = true;
-        PopupBrightnessSlider.Value = status.BrightnessPercent;
-        _isUpdatingBrightnessSlider = false;
+        bool brightnessInteracting = _isDraggingBrightnessSlider || _isAnimatingBrightnessWheel || (nowTick - _lastBrightnessInteractTick <= 300);
+        if (!brightnessInteracting)
+        {
+            _isUpdatingBrightnessSlider = true;
+            PopupBrightnessSlider.Value = status.BrightnessPercent;
+            _isUpdatingBrightnessSlider = false;
 
-        string brightLabel = $"{status.BrightnessPercent}%";
-        PopupBrightnessPercentText.Text = brightLabel;
-        TopBrightnessButton.ToolTip = $"Brightness: {brightLabel} (Click: Slider | Scroll: Adjust | Right-Click: Display Settings)";
+            string brightLabel = $"{status.BrightnessPercent}%";
+            PopupBrightnessPercentText.Text = brightLabel;
+            TopBrightnessButton.ToolTip = $"Brightness: {brightLabel} (Click: Slider | Scroll: Adjust | Right-Click: Display Settings)";
+        }
 
         if (status.HasBattery)
         {
@@ -1013,15 +1069,47 @@ public partial class NotchWindow : Window
 
     private void TopBrightness_MouseWheel(object sender, MouseWheelEventArgs e)
     {
+        if (_isBrightnessPopupOpen)
+        {
+            BrightnessPopup_MouseWheel(sender, e);
+            return;
+        }
+
+        double delta = (e.Delta / 120.0) * 4.0;
+        if (Math.Abs(delta) < 1.0 && e.Delta != 0)
+        {
+            delta = e.Delta > 0 ? 1.0 : -1.0;
+        }
+
         double current = _systemStatusService.CurrentStatus.BrightnessPercent;
-        double next = Math.Clamp(current + (e.Delta > 0 ? 5 : -5), 5, 100);
+        double next = Math.Clamp(current + delta, 5, 100);
+        _lastBrightnessInteractTick = Environment.TickCount64;
         _systemStatusService.SetDisplayBrightness(next);
+        e.Handled = true;
+    }
+
+    private void BrightnessPopup_MouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        double delta = (e.Delta / 120.0) * 3.0;
+        double baseVal = _isAnimatingBrightnessWheel ? _targetBrightnessWheelValue : PopupBrightnessSlider.Value;
+        _targetBrightnessWheelValue = Math.Clamp(baseVal + delta, 5, 100);
+        _isAnimatingBrightnessWheel = true;
+        _lastBrightnessInteractTick = Environment.TickCount64;
+        if (!_sliderWheelTimer.IsEnabled)
+        {
+            _sliderWheelTimer.Start();
+        }
         e.Handled = true;
     }
 
     private void BrightnessSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         if (_isUpdatingBrightnessSlider || !IsLoaded) return;
+        _lastBrightnessInteractTick = Environment.TickCount64;
+        int rounded = Math.Clamp((int)Math.Round(e.NewValue), 5, 100);
+        string brightLabel = $"{rounded}%";
+        PopupBrightnessPercentText.Text = brightLabel;
+        TopBrightnessButton.ToolTip = $"Brightness: {brightLabel} (Click: Slider | Scroll: Adjust | Right-Click: Display Settings)";
         _systemStatusService.SetDisplayBrightness(e.NewValue);
     }
 
@@ -1150,9 +1238,36 @@ public partial class NotchWindow : Window
 
     private void TopVolume_MouseWheel(object sender, MouseWheelEventArgs e)
     {
+        if (_isVolumePopupOpen)
+        {
+            VolumePopup_MouseWheel(sender, e);
+            return;
+        }
+
+        double delta = (e.Delta / 120.0) * 4.0;
+        if (Math.Abs(delta) < 1.0 && e.Delta != 0)
+        {
+            delta = e.Delta > 0 ? 1.0 : -1.0;
+        }
+
         double current = _systemStatusService.CurrentStatus.VolumePercent;
-        double next = Math.Clamp(current + (e.Delta > 0 ? 4 : -4), 0, 100);
+        double next = Math.Clamp(current + delta, 0, 100);
+        _lastVolumeInteractTick = Environment.TickCount64;
         _systemStatusService.SetMasterVolume(next);
+        e.Handled = true;
+    }
+
+    private void VolumePopup_MouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        double delta = (e.Delta / 120.0) * 3.0;
+        double baseVal = _isAnimatingVolumeWheel ? _targetVolumeWheelValue : PopupVolumeSlider.Value;
+        _targetVolumeWheelValue = Math.Clamp(baseVal + delta, 0, 100);
+        _isAnimatingVolumeWheel = true;
+        _lastVolumeInteractTick = Environment.TickCount64;
+        if (!_sliderWheelTimer.IsEnabled)
+        {
+            _sliderWheelTimer.Start();
+        }
         e.Handled = true;
     }
 
@@ -1522,7 +1637,48 @@ public partial class NotchWindow : Window
     private void VolumeSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         if (_isUpdatingVolumeSlider || !IsLoaded) return;
+        _lastVolumeInteractTick = Environment.TickCount64;
+        int rounded = Math.Clamp((int)Math.Round(e.NewValue), 0, 100);
+        bool isMuted = _systemStatusService.CurrentStatus.IsMuted;
+        string volLabel = isMuted ? "Muted" : $"{rounded}%";
+        PopupVolumePercentText.Text = volLabel;
+        TopVolumeText.Text = volLabel;
+        var speakerGeom = (Geometry)FindResource(isMuted || rounded == 0 ? "IconSpeakerMuted" : "IconSpeaker");
+        PopupMuteIconPath.Data = speakerGeom;
+        TopVolumeIcon.Data = speakerGeom;
         _systemStatusService.SetMasterVolume(e.NewValue);
+    }
+
+    private void SliderWheelTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_isAnimatingVolumeWheel)
+        {
+            _isAnimatingVolumeWheel = StepSliderWheel(PopupVolumeSlider, _targetVolumeWheelValue);
+        }
+
+        if (_isAnimatingBrightnessWheel)
+        {
+            _isAnimatingBrightnessWheel = StepSliderWheel(PopupBrightnessSlider, _targetBrightnessWheelValue);
+        }
+
+        if (!_isAnimatingVolumeWheel && !_isAnimatingBrightnessWheel)
+        {
+            _sliderWheelTimer.Stop();
+        }
+    }
+
+    private static bool StepSliderWheel(Slider slider, double target)
+    {
+        double current = slider.Value;
+        double diff = target - current;
+        if (Math.Abs(diff) < 0.15)
+        {
+            slider.Value = target;
+            return false;
+        }
+
+        slider.Value = current + diff * 0.35;
+        return true;
     }
 
     private void HubTabButton_Click(object sender, RoutedEventArgs e)

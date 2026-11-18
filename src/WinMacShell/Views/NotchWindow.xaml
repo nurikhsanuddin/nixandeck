@@ -1098,8 +1098,8 @@
                 VerticalAlignment="Top"
                 Margin="0,34,195,0"
                 Visibility="Collapsed"
-                Background="#F8050508"
-                BorderBrush="#2EFFFFFF"
+                Background="{StaticResource PopupGlassBackgroundBrush}"
+                BorderBrush="{StaticResource PopupGlassBorderBrush}"
                 BorderThickness="1"
                 CornerRadius="14"
                 Padding="8"
@@ -1157,12 +1157,13 @@
                 VerticalAlignment="Top"
                 Margin="0,34,50,0"
                 Visibility="Collapsed"
-                Background="#F8050508"
-                BorderBrush="#2EFFFFFF"
+                Background="{StaticResource PopupGlassBackgroundBrush}"
+                BorderBrush="{StaticResource PopupGlassBorderBrush}"
                 BorderThickness="1"
                 CornerRadius="14"
                 Padding="12,10"
-                Effect="{StaticResource NotchShadowEffect}">
+                Effect="{StaticResource NotchShadowEffect}"
+                PreviewMouseWheel="VolumePopup_MouseWheel">
             <Border.RenderTransform>
                 <TranslateTransform x:Name="VolumePopupSlideTransform" Y="-8"/>
             </Border.RenderTransform>
@@ -1214,12 +1215,13 @@
                 VerticalAlignment="Top"
                 Margin="0,34,95,0"
                 Visibility="Collapsed"
-                Background="#F8050508"
-                BorderBrush="#2EFFFFFF"
+                Background="{StaticResource PopupGlassBackgroundBrush}"
+                BorderBrush="{StaticResource PopupGlassBorderBrush}"
                 BorderThickness="1"
                 CornerRadius="14"
                 Padding="12,10"
-                Effect="{StaticResource NotchShadowEffect}">
+                Effect="{StaticResource NotchShadowEffect}"
+                PreviewMouseWheel="BrightnessPopup_MouseWheel">
             <Border.RenderTransform>
                 <TranslateTransform x:Name="BrightnessPopupSlideTransform" Y="-8"/>
             </Border.RenderTransform>
@@ -1269,8 +1271,8 @@
                 Margin="0,34,10,0"
                 Visibility="Collapsed"
                 Opacity="0"
-                Background="#F608080C"
-                BorderBrush="#28FFFFFF"
+                Background="{StaticResource PopupGlassBackgroundBrush}"
+                BorderBrush="{StaticResource PopupGlassBorderBrush}"
                 BorderThickness="1"
                 CornerRadius="18"
                 Padding="14,10"

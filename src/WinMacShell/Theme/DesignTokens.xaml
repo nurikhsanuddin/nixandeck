@@ -27,6 +27,17 @@
     <SolidColorBrush x:Key="DockBackgroundBrush" Color="{StaticResource DockBackgroundColor}"/>
     <SolidColorBrush x:Key="DockBorderBrush" Color="{StaticResource DockBorderColor}"/>
 
+    <!-- Light Glassmorph Surface & Edge for Flyout Popups -->
+    <LinearGradientBrush x:Key="PopupGlassBackgroundBrush" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#C61A1A22" Offset="0"/>
+        <GradientStop Color="#B6111117" Offset="1"/>
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="PopupGlassBorderBrush" StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="#48FFFFFF" Offset="0"/>
+        <GradientStop Color="#24FFFFFF" Offset="0.5"/>
+        <GradientStop Color="#16FFFFFF" Offset="1"/>
+    </LinearGradientBrush>
+
     <SolidColorBrush x:Key="CardSurfaceBrush" Color="{StaticResource CardSurfaceColor}"/>
     <SolidColorBrush x:Key="CardBorderBrush" Color="{StaticResource CardBorderColor}"/>
     <SolidColorBrush x:Key="HoverSurfaceBrush" Color="{StaticResource HoverSurfaceColor}"/>

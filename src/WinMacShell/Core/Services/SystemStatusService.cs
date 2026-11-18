@@ -42,6 +42,11 @@ public sealed class SystemStatusService : IMMNotificationClient, IDisposable
     private int _isTogglingBluetooth;
     private int _isRefreshing;
     private int _audioDeviceDirty;
+    private int _volumeWorkerRunning;
+    private int _brightnessWorkerRunning;
+    private int _pendingVolumeHasValue;
+    private float _pendingVolumeScalar;
+    private int _pendingBrightnessPercent = -1;
     private int _lastBrightnessPercent = 80;
     private int _lastVolumePercent = 50;
     private bool _lastMuted;
@@ -295,37 +300,71 @@ public sealed class SystemStatusService : IMMNotificationClient, IDisposable
     public void SetMasterVolume(double percent)
     {
         float scalar = (float)Math.Clamp(percent / 100.0, 0.0, 1.0);
-        if (Monitor.TryEnter(_audioLock, 120))
+        int rounded = Math.Clamp((int)Math.Round(percent), 0, 100);
+        _lastVolumePercent = rounded;
+        CurrentStatus = CurrentStatus with { VolumePercent = rounded };
+
+        Volatile.Write(ref _pendingVolumeScalar, scalar);
+        Volatile.Write(ref _pendingVolumeHasValue, 1);
+
+        if (Interlocked.CompareExchange(ref _volumeWorkerRunning, 1, 0) == 0)
         {
-            try
+            _ = Task.Run(ProcessPendingVolumeAsync);
+        }
+    }
+
+    private void ProcessPendingVolumeAsync()
+    {
+        try
+        {
+            while (!_disposed && Interlocked.Exchange(ref _pendingVolumeHasValue, 0) == 1)
             {
-                for (int attempt = 0; attempt < 2; attempt++)
+                float scalar = Volatile.Read(ref _pendingVolumeScalar);
+                if (Monitor.TryEnter(_audioLock, 120))
                 {
                     try
                     {
-                        if (_defaultDevice == null || Interlocked.Exchange(ref _audioDeviceDirty, 0) == 1)
+                        for (int attempt = 0; attempt < 2; attempt++)
                         {
-                            AttachDefaultAudioDeviceUnsafe();
-                        }
-                        if (_defaultDevice != null)
-                        {
-                            _defaultDevice.AudioEndpointVolume.MasterVolumeLevelScalar = scalar;
-                            _lastVolumePercent = Math.Clamp((int)Math.Round(percent), 0, 100);
-                            break;
+                            try
+                            {
+                                if (_defaultDevice == null || Interlocked.Exchange(ref _audioDeviceDirty, 0) == 1)
+                                {
+                                    AttachDefaultAudioDeviceUnsafe();
+                                }
+                                if (_defaultDevice != null)
+                                {
+                                    _defaultDevice.AudioEndpointVolume.MasterVolumeLevelScalar = scalar;
+                                    _lastVolumePercent = Math.Clamp((int)Math.Round(scalar * 100.0f), 0, 100);
+                                    break;
+                                }
+                            }
+                            catch
+                            {
+                                AttachDefaultAudioDeviceUnsafe();
+                            }
                         }
                     }
-                    catch
+                    finally
                     {
-                        AttachDefaultAudioDeviceUnsafe();
+                        Monitor.Exit(_audioLock);
                     }
                 }
             }
-            finally
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _volumeWorkerRunning, 0);
+            if (!_disposed && Volatile.Read(ref _pendingVolumeHasValue) == 1 &&
+                Interlocked.CompareExchange(ref _volumeWorkerRunning, 1, 0) == 0)
             {
-                Monitor.Exit(_audioLock);
+                _ = Task.Run(ProcessPendingVolumeAsync);
+            }
+            else if (!_disposed)
+            {
+                RefreshAndNotify();
             }
         }
-        _ = Task.Run(RefreshAndNotify);
     }
 
     public void ToggleMute()
@@ -367,40 +406,72 @@ public sealed class SystemStatusService : IMMNotificationClient, IDisposable
     public void SetDisplayBrightness(double percent)
     {
         int clamped = Math.Clamp((int)Math.Round(percent), 5, 100);
+        _lastBrightnessPercent = clamped;
+        CurrentStatus = CurrentStatus with { BrightnessPercent = clamped };
+
+        Interlocked.Exchange(ref _pendingBrightnessPercent, clamped);
+
+        if (Interlocked.CompareExchange(ref _brightnessWorkerRunning, 1, 0) == 0)
+        {
+            _ = Task.Run(ProcessPendingBrightnessAsync);
+        }
+    }
+
+    private void ProcessPendingBrightnessAsync()
+    {
         try
         {
-            using var handle = NativeMethods.CreateFile(
-                @"\\.\LCD",
-                NativeMethods.GENERIC_READ | NativeMethods.GENERIC_WRITE,
-                NativeMethods.FILE_SHARE_READ | NativeMethods.FILE_SHARE_WRITE,
-                IntPtr.Zero,
-                NativeMethods.OPEN_EXISTING,
-                0,
-                IntPtr.Zero);
-
-            if (!handle.IsInvalid)
+            while (!_disposed)
             {
-                var brightness = new NativeMethods.DISPLAY_BRIGHTNESS
+                int target = Interlocked.Exchange(ref _pendingBrightnessPercent, -1);
+                if (target < 0) break;
+
+                try
                 {
-                    ucDisplayPolicy = NativeMethods.DISPLAYPOLICY_BOTH,
-                    ucACBrightness = (byte)clamped,
-                    ucDCBrightness = (byte)clamped
-                };
-                NativeMethods.DeviceIoControl(
-                    handle,
-                    NativeMethods.IOCTL_VIDEO_SET_DISPLAY_BRIGHTNESS,
-                    ref brightness,
-                    (uint)Marshal.SizeOf<NativeMethods.DISPLAY_BRIGHTNESS>(),
-                    IntPtr.Zero,
-                    0,
-                    out _,
-                    IntPtr.Zero);
+                    using var handle = NativeMethods.CreateFile(
+                        @"\\.\LCD",
+                        NativeMethods.GENERIC_READ | NativeMethods.GENERIC_WRITE,
+                        NativeMethods.FILE_SHARE_READ | NativeMethods.FILE_SHARE_WRITE,
+                        IntPtr.Zero,
+                        NativeMethods.OPEN_EXISTING,
+                        0,
+                        IntPtr.Zero);
+
+                    if (!handle.IsInvalid)
+                    {
+                        var brightness = new NativeMethods.DISPLAY_BRIGHTNESS
+                        {
+                            ucDisplayPolicy = NativeMethods.DISPLAYPOLICY_BOTH,
+                            ucACBrightness = (byte)target,
+                            ucDCBrightness = (byte)target
+                        };
+                        NativeMethods.DeviceIoControl(
+                            handle,
+                            NativeMethods.IOCTL_VIDEO_SET_DISPLAY_BRIGHTNESS,
+                            ref brightness,
+                            (uint)Marshal.SizeOf<NativeMethods.DISPLAY_BRIGHTNESS>(),
+                            IntPtr.Zero,
+                            0,
+                            out _,
+                            IntPtr.Zero);
+                    }
+                }
+                catch { }
             }
         }
-        catch { }
-
-        _lastBrightnessPercent = clamped;
-        RefreshAndNotify();
+        finally
+        {
+            Interlocked.Exchange(ref _brightnessWorkerRunning, 0);
+            if (!_disposed && Volatile.Read(ref _pendingBrightnessPercent) >= 0 &&
+                Interlocked.CompareExchange(ref _brightnessWorkerRunning, 1, 0) == 0)
+            {
+                _ = Task.Run(ProcessPendingBrightnessAsync);
+            }
+            else if (!_disposed)
+            {
+                RefreshAndNotify();
+            }
+        }
     }
 
     private int ReadDisplayBrightness()
