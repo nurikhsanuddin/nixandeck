@@ -10,6 +10,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using ManagedShell.WindowsTasks;
+using Microsoft.Win32;
 using WinMacShell.Core.Interop;
 using WinMacShell.Core.Services;
 using WinMacShell.Models;
@@ -123,13 +124,26 @@ public partial class DockWindow : Window
         };
 
         SizeChanged += (_, _) => PositionBottomCenter();
+        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
 
         Closed += (_, _) =>
         {
+            SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
             _revealTimer.Stop();
             _hideDelayTimer.Stop();
             _edgeCursorTimer.Stop();
         };
+    }
+
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        Dispatcher.BeginInvoke(PositionBottomCenter, DispatcherPriority.Loaded);
+    }
+
+    protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
+    {
+        base.OnDpiChanged(oldDpi, newDpi);
+        PositionBottomCenter();
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -143,12 +157,15 @@ public partial class DockWindow : Window
     public void PositionBottomCenter()
     {
         if (ActualWidth <= 0 || ActualHeight <= 0) return;
-        _ = VisualTreeHelper.GetDpi(this);
-        double screenWidth = SystemParameters.PrimaryScreenWidth;
-        double screenHeight = SystemParameters.PrimaryScreenHeight;
+        DwmHelper.GetPrimaryMonitorDipBounds(
+            this,
+            out double screenLeft,
+            out double screenTop,
+            out double screenWidth,
+            out double screenHeight);
 
-        Left = (screenWidth - ActualWidth) / 2.0;
-        Top = screenHeight - ActualHeight;
+        Left = screenLeft + (screenWidth - ActualWidth) / 2.0;
+        Top = screenTop + screenHeight - ActualHeight;
     }
 
     private void CheckBottomEdgeCursorHover()
@@ -206,32 +223,33 @@ public partial class DockWindow : Window
         double scaleX = dpi.DpiScaleX > 0 ? dpi.DpiScaleX : 1.0;
         double scaleY = dpi.DpiScaleY > 0 ? dpi.DpiScaleY : 1.0;
 
-        double cursorDipX = pt.X / scaleX;
-        double cursorDipY = pt.Y / scaleY;
-        double screenHeight = SystemParameters.PrimaryScreenHeight;
-        double screenWidth = SystemParameters.PrimaryScreenWidth;
+        DwmHelper.GetPrimaryMonitorRect(out NativeMethods.RECT monitorRect);
+        int edgeThresholdPx = (int)Math.Ceiling(6.0 * scaleY);
+        int halfDockPx = (int)Math.Ceiling(Math.Max(ActualWidth / 2.0 + 48.0, 220.0) * scaleX);
+        int centerX = monitorRect.Left + (monitorRect.Right - monitorRect.Left) / 2;
 
-        double halfDock = Math.Max(ActualWidth / 2.0 + 48.0, 220.0);
-        double centerX = screenWidth / 2.0;
-
-        return cursorDipY >= screenHeight - 6.0 &&
-               cursorDipX >= centerX - halfDock &&
-               cursorDipX <= centerX + halfDock;
+        return pt.Y >= monitorRect.Bottom - edgeThresholdPx &&
+               pt.Y <= monitorRect.Bottom &&
+               pt.X >= centerX - halfDockPx &&
+               pt.X <= centerX + halfDockPx;
     }
 
     private bool IsCursorOverVisibleDock()
     {
         if (!NativeMethods.GetCursorPos(out NativeMethods.POINT pt)) return false;
-        DpiScale dpi = VisualTreeHelper.GetDpi(this);
-        double scaleX = dpi.DpiScaleX > 0 ? dpi.DpiScaleX : 1.0;
-        double scaleY = dpi.DpiScaleY > 0 ? dpi.DpiScaleY : 1.0;
+        IntPtr selfHwnd = new WindowInteropHelper(this).Handle;
+        if (selfHwnd != IntPtr.Zero && NativeMethods.GetWindowRect(selfHwnd, out NativeMethods.RECT dockRect))
+        {
+            DpiScale dpi = VisualTreeHelper.GetDpi(this);
+            int padX = (int)Math.Ceiling(12.0 * (dpi.DpiScaleX > 0 ? dpi.DpiScaleX : 1.0));
+            int padY = (int)Math.Ceiling(8.0 * (dpi.DpiScaleY > 0 ? dpi.DpiScaleY : 1.0));
+            return pt.X >= dockRect.Left - padX &&
+                   pt.X <= dockRect.Right + padX &&
+                   pt.Y >= dockRect.Top - padY &&
+                   pt.Y <= dockRect.Bottom + padY;
+        }
 
-        double cursorDipX = pt.X / scaleX;
-        double cursorDipY = pt.Y / scaleY;
-
-        return cursorDipX >= Left - 12.0 &&
-               cursorDipX <= Left + ActualWidth + 12.0 &&
-               cursorDipY >= Top - 8.0;
+        return false;
     }
 
     private void RebuildDockItems()

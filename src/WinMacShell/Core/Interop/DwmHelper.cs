@@ -1,5 +1,7 @@
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
+using System.Windows.Media;
 
 namespace WinMacShell.Core.Interop;
 
@@ -55,5 +57,59 @@ internal static class DwmHelper
             0,
             0,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+    }
+
+    public static bool GetPrimaryMonitorRect(out NativeMethods.RECT rect)
+    {
+        IntPtr monitor = NativeMethods.MonitorFromPoint(
+            new NativeMethods.POINT { X = 0, Y = 0 },
+            NativeMethods.MONITOR_DEFAULTTOPRIMARY);
+
+        var info = new NativeMethods.MONITORINFO
+        {
+            cbSize = Marshal.SizeOf<NativeMethods.MONITORINFO>()
+        };
+
+        if (monitor != IntPtr.Zero && NativeMethods.GetMonitorInfo(monitor, ref info))
+        {
+            rect = info.rcMonitor;
+            return true;
+        }
+
+        rect = new NativeMethods.RECT
+        {
+            Left = 0,
+            Top = 0,
+            Right = (int)Math.Round(SystemParameters.PrimaryScreenWidth),
+            Bottom = (int)Math.Round(SystemParameters.PrimaryScreenHeight)
+        };
+        return false;
+    }
+
+    public static void GetPrimaryMonitorDipBounds(
+        Visual visual,
+        out double left,
+        out double top,
+        out double width,
+        out double height)
+    {
+        DpiScale dpi = VisualTreeHelper.GetDpi(visual);
+        double scaleX = dpi.DpiScaleX > 0 ? dpi.DpiScaleX : 1.0;
+        double scaleY = dpi.DpiScaleY > 0 ? dpi.DpiScaleY : 1.0;
+
+        if (GetPrimaryMonitorRect(out NativeMethods.RECT rect))
+        {
+            left = rect.Left / scaleX;
+            top = rect.Top / scaleY;
+            width = (rect.Right - rect.Left) / scaleX;
+            height = (rect.Bottom - rect.Top) / scaleY;
+        }
+        else
+        {
+            left = 0;
+            top = 0;
+            width = SystemParameters.PrimaryScreenWidth;
+            height = SystemParameters.PrimaryScreenHeight;
+        }
     }
 }

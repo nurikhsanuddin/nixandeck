@@ -12,6 +12,7 @@ using System.Windows.Media.Effects;
 using System.Windows.Threading;
 using ManagedShell.WindowsTasks;
 using ManagedShell.WindowsTray;
+using Microsoft.Win32;
 using WinMacShell.Core.Interop;
 using WinMacShell.Core.Safety;
 using WinMacShell.Core.Services;
@@ -266,14 +267,29 @@ public partial class NotchWindow : Window
             RefreshNotificationDrawer();
         };
 
+        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+
         Closed += (_, _) =>
         {
+            SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
             _clockAlignmentTimer.Stop();
             _toastAutoCollapseTimer.Stop();
             _hubHoverOpenTimer.Stop();
             _hubHoverCloseTimer.Stop();
+            _sliderWheelTimer.Stop();
             _visualizerStoryboard?.Stop();
         };
+    }
+
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        Dispatcher.BeginInvoke(PositionTopBar, DispatcherPriority.Loaded);
+    }
+
+    protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
+    {
+        base.OnDpiChanged(oldDpi, newDpi);
+        PositionTopBar();
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -287,10 +303,16 @@ public partial class NotchWindow : Window
 
     private void PositionTopBar()
     {
-        _ = VisualTreeHelper.GetDpi(this);
-        Left = 0;
-        Top = 0;
-        Width = SystemParameters.PrimaryScreenWidth;
+        DwmHelper.GetPrimaryMonitorDipBounds(
+            this,
+            out double screenLeft,
+            out double screenTop,
+            out double screenWidth,
+            out _);
+
+        Left = screenLeft;
+        Top = screenTop;
+        Width = screenWidth;
     }
 
     private void UpdateClockText()
