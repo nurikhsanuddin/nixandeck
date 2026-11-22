@@ -13,4 +13,5 @@ public sealed class NotificationItem
     public string TimeText => Timestamp.LocalDateTime.ToString("HH:mm");
     public ImageSource? AppIcon { get; init; }
     public bool IsAlarm { get; init; }
+    public string LaunchUri { get; set; } = string.Empty;
 }

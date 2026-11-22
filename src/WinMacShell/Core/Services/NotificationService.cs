@@ -508,6 +508,8 @@ public sealed class NotificationService : IDisposable
             }
             catch { }
 
+            string launchUri = TryLookupWpnLaunchUri(notification.Id);
+
             return new NotificationItem
             {
                 Id = notification.Id,
@@ -517,7 +519,8 @@ public sealed class NotificationService : IDisposable
                 Body = body,
                 Timestamp = notification.CreationTime,
                 AppIcon = logo,
-                IsAlarm = isAlarm
+                IsAlarm = isAlarm,
+                LaunchUri = launchUri
             };
         }
         catch
@@ -611,6 +614,7 @@ public sealed class NotificationService : IDisposable
 
                 if (!_seenIds.Add((uint)row.Id))
                 {
+                    EnrichExistingLaunchUri((uint)row.Id, row.PayloadXml);
                     continue;
                 }
 
@@ -697,6 +701,127 @@ public sealed class NotificationService : IDisposable
         return Encoding.UTF8.GetString(buffer).Trim('\0', '\uFEFF');
     }
 
+    private void EnrichExistingLaunchUri(uint id, string payloadXml)
+    {
+        if (string.IsNullOrWhiteSpace(payloadXml)) return;
+        string launchUri = ExtractLaunchUriFromXml(payloadXml);
+        if (string.IsNullOrWhiteSpace(launchUri)) return;
+
+        lock (_historyLock)
+        {
+            NotificationItem? match = History.FirstOrDefault(n => n.Id == id);
+            if (match != null && string.IsNullOrWhiteSpace(match.LaunchUri))
+            {
+                match.LaunchUri = launchUri;
+            }
+        }
+    }
+
+    private static string TryLookupWpnLaunchUri(uint notificationId)
+    {
+        string dbPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            @"Microsoft\Windows\Notifications\wpndatabase.db");
+
+        if (!File.Exists(dbPath)) return string.Empty;
+
+        IntPtr db = IntPtr.Zero;
+        IntPtr stmt = IntPtr.Zero;
+
+        try
+        {
+            byte[] pathBytes = Encoding.UTF8.GetBytes(dbPath + "\0");
+            if (NativeMethods.sqlite3_open_v2(pathBytes, out db, NativeMethods.SQLITE_OPEN_READWRITE, IntPtr.Zero) != 0 || db == IntPtr.Zero)
+            {
+                return string.Empty;
+            }
+
+            string query = $"SELECT Payload FROM Notification WHERE Id = {(long)notificationId} LIMIT 1;\0";
+            byte[] sqlBytes = Encoding.UTF8.GetBytes(query);
+            if (NativeMethods.sqlite3_prepare_v2(db, sqlBytes, -1, out stmt, IntPtr.Zero) != 0 || stmt == IntPtr.Zero)
+            {
+                return string.Empty;
+            }
+
+            if (NativeMethods.sqlite3_step(stmt) == NativeMethods.SQLITE_ROW)
+            {
+                string payloadXml = ReadUtf8Column(stmt, 0);
+                return ExtractLaunchUriFromXml(payloadXml);
+            }
+        }
+        catch
+        {
+            // Ignore transient SQLite read/lock issues
+        }
+        finally
+        {
+            if (stmt != IntPtr.Zero) NativeMethods.sqlite3_finalize(stmt);
+            if (db != IntPtr.Zero) NativeMethods.sqlite3_close(db);
+        }
+
+        return string.Empty;
+    }
+
+    private static string ExtractLaunchUriFromXml(string? payloadXml)
+    {
+        if (string.IsNullOrWhiteSpace(payloadXml)) return string.Empty;
+        try
+        {
+            XDocument doc = XDocument.Parse(payloadXml);
+            return ExtractLaunchUri(doc);
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private static string ExtractLaunchUri(XDocument doc)
+    {
+        string? rootLaunch = (string?)doc.Root?.Attribute("launch");
+        string? rootActivationType = (string?)doc.Root?.Attribute("activationType");
+        if (IsProtocolLaunch(rootLaunch, rootActivationType))
+        {
+            return System.Net.WebUtility.HtmlDecode(rootLaunch!.Trim());
+        }
+
+        foreach (XElement action in doc.Descendants("action"))
+        {
+            string? placement = (string?)action.Attribute("placement");
+            if (string.Equals(placement, "contextMenu", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string? args = (string?)action.Attribute("arguments");
+            string? actionType = (string?)action.Attribute("activationType");
+            if (IsProtocolLaunch(args, actionType))
+            {
+                return System.Net.WebUtility.HtmlDecode(args!.Trim());
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static bool IsProtocolLaunch(string? value, string? activationType)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+
+        string decoded = System.Net.WebUtility.HtmlDecode(value.Trim());
+        if (string.Equals(activationType, "protocol", StringComparison.OrdinalIgnoreCase))
+        {
+            return Uri.TryCreate(decoded, UriKind.Absolute, out _);
+        }
+
+        if (Uri.TryCreate(decoded, UriKind.Absolute, out Uri? uri))
+        {
+            return uri.Scheme.Length >= 2 && !uri.IsFile && !uri.IsUnc;
+        }
+
+        return false;
+    }
+
     private static async Task<NotificationItem?> ParseWpnRowAsync(WpnRawRow row)
     {
         if (string.IsNullOrWhiteSpace(row.PayloadXml)) return null;
@@ -765,6 +890,8 @@ public sealed class NotificationService : IDisposable
                 timestamp = DateTimeOffset.Now;
             }
 
+            string launchUri = ExtractLaunchUri(doc);
+
             return new NotificationItem
             {
                 Id = (uint)row.Id,
@@ -774,7 +901,8 @@ public sealed class NotificationService : IDisposable
                 Body = body,
                 Timestamp = timestamp,
                 AppIcon = logo,
-                IsAlarm = isAlarm
+                IsAlarm = isAlarm,
+                LaunchUri = launchUri
             };
         }
         catch

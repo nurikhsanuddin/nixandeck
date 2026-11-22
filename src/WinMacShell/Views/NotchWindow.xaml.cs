@@ -1469,6 +1469,13 @@ public partial class NotchWindow : Window
         string appId = item.AppId ?? string.Empty;
         string appName = item.AppName ?? string.Empty;
 
+        // 0. Direct protocol / action URI extracted from the toast payload XML
+        if (!string.IsNullOrWhiteSpace(item.LaunchUri))
+        {
+            LaunchShellUri(item.LaunchUri);
+            return;
+        }
+
         // 1. Fast path for Windows Clock / Alarms
         if (item.IsAlarm ||
             appName.Equals("Clock", StringComparison.OrdinalIgnoreCase) ||
@@ -1485,7 +1492,15 @@ public partial class NotchWindow : Window
             return;
         }
 
-        // 2. Match against live taskbar/shell windows (handles Win32 & UWP ApplicationFrameHost windows)
+        // 2. Windows system & Bluetooth pairing/device setup toasts
+        string? systemUri = TryResolveSystemNotificationUri(appId, appName, item.Title, item.Body);
+        if (!string.IsNullOrWhiteSpace(systemUri))
+        {
+            LaunchShellUri(systemUri);
+            return;
+        }
+
+        // 3. Match against live taskbar/shell windows (handles Win32 & UWP ApplicationFrameHost windows)
         ApplicationWindow? match = FindMatchingWindow(appId, appName);
         if (match != null)
         {
@@ -1493,7 +1508,7 @@ public partial class NotchWindow : Window
             return;
         }
 
-        // 3. Fallback scan of running processes with a main window handle
+        // 4. Fallback scan of running processes with a main window handle
         if (!string.IsNullOrWhiteSpace(appName) && appName.Length >= 3)
         {
             foreach (Process proc in Process.GetProcesses())
@@ -1518,17 +1533,17 @@ public partial class NotchWindow : Window
             }
         }
 
-        // 4. Launch app cleanly if no existing window is open (e.g. minimized to tray or background notification)
+        // 5. Launch app cleanly if no existing window is open (e.g. minimized to tray or background notification)
         if (!string.IsNullOrWhiteSpace(appId))
         {
-            if (appId.Contains('!'))
-            {
-                LaunchShellUri($"shell:AppsFolder\\{appId}");
-                return;
-            }
             if (appId.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && File.Exists(appId))
             {
                 LaunchShellUri(appId);
+                return;
+            }
+            if (!appId.StartsWith("Windows.System", StringComparison.OrdinalIgnoreCase))
+            {
+                LaunchShellUri($"shell:AppsFolder\\{appId}");
                 return;
             }
         }
@@ -1545,6 +1560,111 @@ public partial class NotchWindow : Window
         {
             LaunchShellUri("discord:");
         }
+    }
+
+    private static string? TryResolveSystemNotificationUri(string appId, string appName, string title, string body)
+    {
+        if (appId.StartsWith("Windows.SystemToast.Bth", StringComparison.OrdinalIgnoreCase) ||
+            appId.Equals("Windows.SystemToast.DevicesFlow", StringComparison.OrdinalIgnoreCase) ||
+            appId.Equals("Windows.SystemToast.NfpDevicePairing", StringComparison.OrdinalIgnoreCase) ||
+            appId.Equals("Windows.SystemToast.Devices", StringComparison.OrdinalIgnoreCase) ||
+            appId.Equals("Windows.SystemToast.DeviceConsent", StringComparison.OrdinalIgnoreCase) ||
+            appId.Equals("Windows.SystemToast.DeviceManagement", StringComparison.OrdinalIgnoreCase))
+        {
+            return "ms-settings:bluetooth";
+        }
+
+        if (appId.Equals("Windows.SystemToast.AudioTroubleshooter", StringComparison.OrdinalIgnoreCase) ||
+            appId.Equals("Windows.SystemToast.DefaultAudioEndpoint", StringComparison.OrdinalIgnoreCase) ||
+            appId.Equals("Windows.System.Audio", StringComparison.OrdinalIgnoreCase))
+        {
+            return "ms-settings:sound";
+        }
+
+        if (appId.Equals("Windows.SystemToast.DisplayBroker", StringComparison.OrdinalIgnoreCase))
+        {
+            return "ms-settings:display";
+        }
+
+        if (appId.Equals("Windows.System.MiracastReceiver", StringComparison.OrdinalIgnoreCase) ||
+            appId.Equals("Windows.System.NearShareExperienceReceive", StringComparison.OrdinalIgnoreCase) ||
+            appId.Equals("Windows.System.ShareExperience", StringComparison.OrdinalIgnoreCase))
+        {
+            return "ms-settings:nearbysharing";
+        }
+
+        if (appId.Equals("Windows.SystemToast.LowDisk", StringComparison.OrdinalIgnoreCase))
+        {
+            return "ms-settings:storagesense";
+        }
+
+        if (appId.Equals("Windows.Defender", StringComparison.OrdinalIgnoreCase))
+        {
+            return "windowsdefender:";
+        }
+
+        if (appId.Equals("Windows.SystemToast.BackgroundAccess", StringComparison.OrdinalIgnoreCase))
+        {
+            return "ms-settings:privacy-backgroundapps";
+        }
+
+        if (appId.Equals("Windows.SystemToast.LocationManager", StringComparison.OrdinalIgnoreCase))
+        {
+            return "ms-settings:privacy-location";
+        }
+
+        if (appId.Equals("Windows.SystemToast.LanguageSettings", StringComparison.OrdinalIgnoreCase))
+        {
+            return "ms-settings:regionlanguage";
+        }
+
+        if (appId.Equals("Windows.SystemToast.AutoPlay", StringComparison.OrdinalIgnoreCase))
+        {
+            return "ms-settings:autoplay";
+        }
+
+        if (appId.Equals("Windows.SystemToast.Explorer", StringComparison.OrdinalIgnoreCase) ||
+            appId.StartsWith("Microsoft.Explorer.Notification.", StringComparison.OrdinalIgnoreCase))
+        {
+            return "explorer.exe";
+        }
+
+        if (appId.Equals("Microsoft.Windows.DynamicLightingToastHandler", StringComparison.OrdinalIgnoreCase))
+        {
+            return "ms-settings:personalization-lighting";
+        }
+
+        if (appId.Equals("Windows.SystemToast.HelloFace", StringComparison.OrdinalIgnoreCase))
+        {
+            return "ms-settings:signinoptions";
+        }
+
+        bool isSystemSource = string.IsNullOrWhiteSpace(appId) ||
+            appId.StartsWith("Windows.SystemToast.", StringComparison.OrdinalIgnoreCase) ||
+            appId.StartsWith("Windows.System.", StringComparison.OrdinalIgnoreCase) ||
+            appId.StartsWith("Microsoft.Windows.", StringComparison.OrdinalIgnoreCase);
+
+        if (isSystemSource)
+        {
+            string combined = $"{appName} {title} {body}";
+            if (combined.Contains("bluetooth", StringComparison.OrdinalIgnoreCase) ||
+                combined.Contains("quick pair", StringComparison.OrdinalIgnoreCase) ||
+                combined.Contains("swift pair", StringComparison.OrdinalIgnoreCase) ||
+                combined.Contains("pair device", StringComparison.OrdinalIgnoreCase) ||
+                combined.Contains("add a device", StringComparison.OrdinalIgnoreCase) ||
+                combined.Contains("set up", StringComparison.OrdinalIgnoreCase))
+            {
+                return "ms-settings:bluetooth";
+            }
+
+            if (appId.StartsWith("Windows.SystemToast.", StringComparison.OrdinalIgnoreCase) ||
+                appId.StartsWith("Windows.System.", StringComparison.OrdinalIgnoreCase))
+            {
+                return "ms-settings:";
+            }
+        }
+
+        return null;
     }
 
     private ApplicationWindow? FindMatchingWindow(string appId, string appName)
