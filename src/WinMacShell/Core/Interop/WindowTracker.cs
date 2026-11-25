@@ -261,9 +261,12 @@ public sealed class WindowTracker : IDisposable
             return (true, false);
         }
 
-        int dockTopThreshold = mi.rcMonitor.Bottom - 78;
-        int centerMinX = mi.rcMonitor.Width / 4;
-        int centerMaxX = (mi.rcMonitor.Width * 3) / 4;
+        double scaleY = DwmHelper.GetPrimaryMonitorDpiScale(out _, out double primaryScaleY)
+            ? primaryScaleY
+            : 1.0;
+        int dockTopThreshold = mi.rcMonitor.Bottom - (int)Math.Ceiling(78.0 * scaleY);
+        int centerMinX = mi.rcMonitor.Left + (mi.rcMonitor.Width / 4);
+        int centerMaxX = mi.rcMonitor.Left + ((mi.rcMonitor.Width * 3) / 4);
 
         bool overlapsHorizontally = winRect.Right > centerMinX && winRect.Left < centerMaxX;
         bool overlapsVertically = winRect.Bottom >= dockTopThreshold && winRect.Top < mi.rcMonitor.Bottom;

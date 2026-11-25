@@ -31,6 +31,9 @@ internal static class DwmHelper
         int cornerPref = NativeMethods.DWMWCP_DONOTROUND;
         NativeMethods.DwmSetWindowAttribute(hwnd, NativeMethods.DWMWA_WINDOW_CORNER_PREFERENCE, ref cornerPref, sizeof(int));
 
+        int borderNone = NativeMethods.DWMWA_COLOR_NONE;
+        NativeMethods.DwmSetWindowAttribute(hwnd, NativeMethods.DWMWA_BORDER_COLOR, ref borderNone, sizeof(int));
+
         int backdropNone = NativeMethods.DWMSBT_NONE;
         NativeMethods.DwmSetWindowAttribute(hwnd, NativeMethods.DWMWA_SYSTEMBACKDROP_TYPE, ref backdropNone, sizeof(int));
 
@@ -86,6 +89,33 @@ internal static class DwmHelper
         return false;
     }
 
+    public static bool GetPrimaryMonitorDpiScale(out double scaleX, out double scaleY)
+    {
+        try
+        {
+            IntPtr monitor = NativeMethods.MonitorFromPoint(
+                new NativeMethods.POINT { X = 0, Y = 0 },
+                NativeMethods.MONITOR_DEFAULTTOPRIMARY);
+
+            if (monitor != IntPtr.Zero &&
+                NativeMethods.GetDpiForMonitor(monitor, NativeMethods.MDT_EFFECTIVE_DPI, out uint dpiX, out uint dpiY) == 0 &&
+                dpiX > 0 && dpiY > 0)
+            {
+                scaleX = dpiX / 96.0;
+                scaleY = dpiY / 96.0;
+                return true;
+            }
+        }
+        catch
+        {
+            // Fallback on older builds without shcore.dll
+        }
+
+        scaleX = 1.0;
+        scaleY = 1.0;
+        return false;
+    }
+
     public static void GetPrimaryMonitorDipBounds(
         Visual visual,
         out double left,
@@ -96,6 +126,10 @@ internal static class DwmHelper
         DpiScale dpi = VisualTreeHelper.GetDpi(visual);
         double scaleX = dpi.DpiScaleX > 0 ? dpi.DpiScaleX : 1.0;
         double scaleY = dpi.DpiScaleY > 0 ? dpi.DpiScaleY : 1.0;
+        if (dpi.DpiScaleX <= 0 || dpi.DpiScaleY <= 0)
+        {
+            GetPrimaryMonitorDpiScale(out scaleX, out scaleY);
+        }
 
         if (GetPrimaryMonitorRect(out NativeMethods.RECT rect))
         {

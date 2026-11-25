@@ -137,7 +137,11 @@ public partial class DockWindow : Window
 
     private void OnDisplaySettingsChanged(object? sender, EventArgs e)
     {
-        Dispatcher.BeginInvoke(PositionBottomCenter, DispatcherPriority.Loaded);
+        Dispatcher.BeginInvoke(() =>
+        {
+            PositionBottomCenter();
+            _windowTracker.EvaluateForegroundState();
+        }, DispatcherPriority.Loaded);
     }
 
     protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
@@ -219,9 +223,12 @@ public partial class DockWindow : Window
     private bool IsCursorNearBottomDockEdge()
     {
         if (!NativeMethods.GetCursorPos(out NativeMethods.POINT pt)) return false;
-        DpiScale dpi = VisualTreeHelper.GetDpi(this);
-        double scaleX = dpi.DpiScaleX > 0 ? dpi.DpiScaleX : 1.0;
-        double scaleY = dpi.DpiScaleY > 0 ? dpi.DpiScaleY : 1.0;
+        if (!DwmHelper.GetPrimaryMonitorDpiScale(out double scaleX, out double scaleY))
+        {
+            DpiScale dpi = VisualTreeHelper.GetDpi(this);
+            scaleX = dpi.DpiScaleX > 0 ? dpi.DpiScaleX : 1.0;
+            scaleY = dpi.DpiScaleY > 0 ? dpi.DpiScaleY : 1.0;
+        }
 
         DwmHelper.GetPrimaryMonitorRect(out NativeMethods.RECT monitorRect);
         int edgeThresholdPx = (int)Math.Ceiling(6.0 * scaleY);

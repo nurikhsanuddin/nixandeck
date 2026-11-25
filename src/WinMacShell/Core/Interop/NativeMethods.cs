@@ -59,11 +59,14 @@ internal static class NativeMethods
     public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
     public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
     public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+    public const int DWMWA_BORDER_COLOR = 34;
+    public const int DWMWA_COLOR_NONE = unchecked((int)0xFFFFFFFE);
     public const int DWMWCP_DONOTROUND = 1;
     public const int DWMWCP_ROUND = 2;
     public const int DWMWA_SYSTEMBACKDROP_TYPE = 38;
     public const int DWMSBT_NONE = 1;
     public const int DWMSBT_TRANSIENTWINDOW = 3;
+    public const int MDT_EFFECTIVE_DPI = 0;
 
     public const uint ABM_NEW = 0x00000000;
     public const uint ABM_REMOVE = 0x00000001;
@@ -286,6 +289,9 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
+
+    [DllImport("shcore.dll")]
+    public static extern int GetDpiForMonitor(IntPtr hmonitor, int dpiType, out uint dpiX, out uint dpiY);
 
     [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.StdCall)]
     public static extern int sqlite3_open_v2(byte[] filename, out IntPtr db, int flags, IntPtr zVfs);

@@ -36,6 +36,12 @@ public sealed class TaskbarGuard : IDisposable
 
     public void UpdateDpiScale(Visual visual)
     {
+        if (DwmHelper.GetPrimaryMonitorDpiScale(out _, out double primaryScaleY))
+        {
+            _dpiScaleY = primaryScaleY;
+            return;
+        }
+
         try
         {
             DpiScale dpi = VisualTreeHelper.GetDpi(visual);
@@ -45,6 +51,15 @@ public sealed class TaskbarGuard : IDisposable
             }
         }
         catch { }
+    }
+
+    public void RefreshForDisplayChange()
+    {
+        if (!_isHidden) return;
+
+        // Re-hide system taskbars in case Explorer recreated or showed them on primary monitor switch
+        ApplyExplorerTaskbarVisibility(show: false);
+        ApplyTopMenuBarWorkArea();
     }
 
     public void HideSystemTaskbar()
@@ -70,6 +85,24 @@ public sealed class TaskbarGuard : IDisposable
     }
 
     private void SetTaskbarVisibility(bool show)
+    {
+        ApplyExplorerTaskbarVisibility(show);
+
+        _isHidden = !show;
+
+        if (!show)
+        {
+            ApplyTopMenuBarWorkArea();
+        }
+        else
+        {
+            RestoreWorkArea();
+        }
+
+        TaskbarVisibilityChanged?.Invoke(this, _isHidden);
+    }
+
+    private void ApplyExplorerTaskbarVisibility(bool show)
     {
         IntPtr primary = NativeMethods.FindWindow("Shell_TrayWnd", null);
 
@@ -111,19 +144,6 @@ public sealed class TaskbarGuard : IDisposable
         {
             NativeMethods.ShowWindow(secondary, cmd);
         }
-
-        _isHidden = !show;
-
-        if (!show)
-        {
-            ApplyTopMenuBarWorkArea();
-        }
-        else
-        {
-            RestoreWorkArea();
-        }
-
-        TaskbarVisibilityChanged?.Invoke(this, _isHidden);
     }
 
     private void EnsureTopAppBarRegistered()
@@ -158,7 +178,14 @@ public sealed class TaskbarGuard : IDisposable
         _appBarRegistered = false;
     }
 
-    private int GetReservedTopPx() => Math.Max(1, (int)Math.Floor(TopBarHeightDip * _dpiScaleY) - 1);
+    private int GetReservedTopPx()
+    {
+        double scaleY = DwmHelper.GetPrimaryMonitorDpiScale(out _, out double primaryScaleY)
+            ? primaryScaleY
+            : _dpiScaleY;
+        _dpiScaleY = scaleY;
+        return Math.Max(1, (int)Math.Floor(TopBarHeightDip * scaleY) - 1);
+    }
 
     private void ApplyTopMenuBarWorkArea()
     {
@@ -273,10 +300,10 @@ public sealed class TaskbarGuard : IDisposable
             frameRect = winRect;
         }
 
-        int leftBorder = frameRect.Left - winRect.Left;
-        int topBorder = frameRect.Top - winRect.Top;
-        int rightBorder = winRect.Right - frameRect.Right;
-        int bottomBorder = winRect.Bottom - frameRect.Bottom;
+        int leftBorder = Math.Max(0, frameRect.Left - winRect.Left);
+        int topBorder = Math.Max(0, frameRect.Top - winRect.Top);
+        int rightBorder = Math.Max(0, winRect.Right - frameRect.Right);
+        int bottomBorder = Math.Max(0, winRect.Bottom - frameRect.Bottom);
 
         int reservedTopPx = GetReservedTopPx();
         int minTop = mi.rcMonitor.Top + reservedTopPx;
@@ -324,12 +351,35 @@ public sealed class TaskbarGuard : IDisposable
         {
             UnregisterTopAppBar();
 
-            if (_originalWorkArea is NativeMethods.RECT orig)
+            NativeMethods.RECT? targetWorkArea = null;
+            if (DwmHelper.GetPrimaryMonitorRect(out NativeMethods.RECT primaryRect))
+            {
+                if (_originalWorkArea is NativeMethods.RECT orig &&
+                    orig.Left >= primaryRect.Left &&
+                    orig.Top >= primaryRect.Top &&
+                    orig.Right <= primaryRect.Right &&
+                    orig.Bottom <= primaryRect.Bottom &&
+                    orig.Width > 0 &&
+                    orig.Height > 0)
+                {
+                    targetWorkArea = orig;
+                }
+                else
+                {
+                    targetWorkArea = primaryRect;
+                }
+            }
+            else if (_originalWorkArea is NativeMethods.RECT origFallback)
+            {
+                targetWorkArea = origFallback;
+            }
+
+            if (targetWorkArea is NativeMethods.RECT restoreRect)
             {
                 NativeMethods.SystemParametersInfo(
                     NativeMethods.SPI_SETWORKAREA,
                     0,
-                    ref orig,
+                    ref restoreRect,
                     NativeMethods.SPIF_SENDCHANGE);
 
                 var visibleWindows = _shellService?.GetVisibleWindows();
@@ -337,7 +387,7 @@ public sealed class TaskbarGuard : IDisposable
                 {
                     foreach (var win in visibleWindows)
                     {
-                        RestoreMaximizedWindowToWorkArea(win.Handle, orig);
+                        RestoreMaximizedWindowToWorkArea(win.Handle, restoreRect);
                     }
                 }
 
@@ -380,10 +430,10 @@ public sealed class TaskbarGuard : IDisposable
             frameRect = winRect;
         }
 
-        int leftBorder = frameRect.Left - winRect.Left;
-        int topBorder = frameRect.Top - winRect.Top;
-        int rightBorder = winRect.Right - frameRect.Right;
-        int bottomBorder = winRect.Bottom - frameRect.Bottom;
+        int leftBorder = Math.Max(0, frameRect.Left - winRect.Left);
+        int topBorder = Math.Max(0, frameRect.Top - winRect.Top);
+        int rightBorder = Math.Max(0, winRect.Right - frameRect.Right);
+        int bottomBorder = Math.Max(0, winRect.Bottom - frameRect.Bottom);
 
         NativeMethods.SetWindowPos(
             hwnd,

@@ -283,13 +283,20 @@ public partial class NotchWindow : Window
 
     private void OnDisplaySettingsChanged(object? sender, EventArgs e)
     {
-        Dispatcher.BeginInvoke(PositionTopBar, DispatcherPriority.Loaded);
+        Dispatcher.BeginInvoke(() =>
+        {
+            PositionTopBar();
+            _taskbarGuard.UpdateDpiScale(this);
+            _taskbarGuard.RefreshForDisplayChange();
+        }, DispatcherPriority.Loaded);
     }
 
     protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
     {
         base.OnDpiChanged(oldDpi, newDpi);
         PositionTopBar();
+        _taskbarGuard.UpdateDpiScale(this);
+        _taskbarGuard.RefreshForDisplayChange();
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -785,6 +792,8 @@ public partial class NotchWindow : Window
         else
         {
             Visibility = Visibility.Visible;
+            PositionTopBar();
+            DwmHelper.EnsureTopmost(this);
         }
     }
 
